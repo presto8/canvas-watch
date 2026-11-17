@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""Project command for syncing, scraping, and querying Canvas data."""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+VENV_PYTHON = ROOT / ".venv" / "bin" / "python"
+PYTHON = str(VENV_PYTHON if VENV_PYTHON.is_file() else Path(sys.executable))
+
+
+def usage() -> None:
+    print("""Usage: canvas <command> [options]
+
+Commands:
+  sync                 Fetch observed students' course and grade data into SQLite
+  mirror               Alias for sync
+  scrape [URL]         Scrape one Canvas page into JSON
+  list [students|classes]
+                       Show observed students and/or their current classes
+  show --student NAME --course NAME [--all-periods]
+                       Show assignments and grades for a course (current quarter by default)
+  missing [--student NAME] [--all-periods]
+                       Find unsubmitted assignments in the current quarter
+  alerts [--student NAME] [--threshold PCT] [--all-periods]
+                       Find assignments below 90% or marked missing
+  upcoming [--days N] [--student NAME] [--all-periods]
+                       Show upcoming deadlines (next 7 days by default)
+  students             Alias for 'list students'
+  classes              Alias for 'list classes'
+  help                 Show this help
+
+Run 'canvas <command> --help' for command-specific options.""")
+
+
+def main() -> None:
+    if len(sys.argv) < 2 or sys.argv[1] in ("help", "-h", "--help"):
+        usage()
+        raise SystemExit(0)
+
+    command, *args = sys.argv[1:]
+    if command in ("sync", "mirror"):
+        target = ROOT / "canvas_scraper.py"
+        command_args = args
+    elif command == "scrape":
+        target = ROOT / "canvas_scraper.py"
+        command_args = ["--page", *args]
+    elif command == "list":
+        target = ROOT / "canvas_query.py"
+        command_args = args
+    elif command in ("show", "grades", "assignments"):
+        target = ROOT / "canvas_query.py"
+        command_args = ["assignments", *args]
+    elif command in ("missing", "not-submitted"):
+        target = ROOT / "canvas_query.py"
+        command_args = ["not-submitted", *args]
+    elif command == "alerts":
+        target = ROOT / "canvas_query.py"
+        command_args = ["alerts", *args]
+    elif command == "upcoming":
+        target = ROOT / "canvas_query.py"
+        command_args = ["upcoming", *args]
+    elif command == "students":
+        target = ROOT / "canvas_query.py"
+        command_args = ["students", *args]
+    elif command == "classes":
+        target = ROOT / "canvas_query.py"
+        command_args = ["classes", *args]
+    else:
+        print(f"Unknown command: {command}\n", file=sys.stderr)
+        usage()
+        raise SystemExit(2)
+
+    os.execv(PYTHON, [PYTHON, str(target), *command_args])
+
+
+if __name__ == "__main__":
+    main()
