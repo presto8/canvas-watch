@@ -366,6 +366,27 @@ def show_upcoming(
     return 0
 
 
+def _format_history_time(value: str) -> str:
+    try:
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return timestamp.astimezone().strftime("%Y-%m-%d %H:%M")
+    except (AttributeError, ValueError):
+        return (value or "")[:16].replace("T", " ")
+
+
+def _print_columns(headers: tuple[str, ...], rows: list[tuple[str, ...]], widths: tuple[int, ...]) -> None:
+    def fit(value: str, width: int) -> str:
+        value = str(value)
+        if len(value) > width:
+            return value[:width - 1] + "…"
+        return value.ljust(width)
+
+    print("  ".join(fit(header, width) for header, width in zip(headers, widths)))
+    print("  ".join("─" * width for width in widths))
+    for row in rows:
+        print("  ".join(fit(value, width) for value, width in zip(row, widths)))
+
+
 def show_history(db_path: Path, student_filter: str | None = None, limit: int = 10) -> int:
     if not 1 <= limit <= 100:
         print("--limit must be between 1 and 100.", file=sys.stderr)
@@ -451,17 +472,22 @@ def show_history(db_path: Path, student_filter: str | None = None, limit: int = 
     if not runs:
         print("  No sync runs recorded yet.")
     else:
-        for run in runs:
-            print(
-                f"  #{run['id']}  {run['scraped_at']}  "
-                f"{run['students']} students, {run['courses']} courses, "
-                f"{run['assignments']} assignments, {run['submissions']} submissions"
-            )
+        run_rows = [(
+            f"#{run['id']}", _format_history_time(run["scraped_at"]),
+            str(run["students"]), str(run["courses"]),
+            str(run["assignments"]), str(run["submissions"]),
+        ) for run in runs]
+        _print_columns(
+            ("RUN", "DATE/TIME", "STUDENTS", "COURSES", "ASSIGNMENTS", "SUBMISSIONS"),
+            run_rows,
+            (5, 16, 8, 8, 12, 12),
+        )
 
     print("\nRecent grade/submission changes")
     if not changes:
         print("  No grade or submission changes detected between stored syncs.")
         return 0
+    change_rows = []
     for change in changes:
         before = change["previous_grade"]
         if change["previous_score"] is not None:
@@ -487,10 +513,18 @@ def show_history(db_path: Path, student_filter: str | None = None, limit: int = 
         if change["late_flag"] != change["previous_late"]:
             details.append("late status changed")
         assignment_name = change["assignment"] or f"Assignment {change['assignment_id']}"
-        print(
-            f"  {change['scraped_at']}  {change['student']} — {change['course'] or 'Course'} — "
-            f"{assignment_name}: {', '.join(details)}"
-        )
+        change_rows.append((
+            _format_history_time(change["scraped_at"]),
+            change["student"] or "",
+            change["course"] or "Course",
+            assignment_name,
+            ", ".join(details),
+        ))
+    _print_columns(
+        ("DATE/TIME", "STUDENT", "COURSE", "ASSIGNMENT", "CHANGE"),
+        change_rows,
+        (16, 18, 20, 25, 30),
+    )
     return 0
 
 
