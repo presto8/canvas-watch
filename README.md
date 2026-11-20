@@ -122,6 +122,22 @@ canvas history --limit 20
 canvas history --student '<student name>'
 ```
 
+Download Canvas-hosted files linked from assignment descriptions in the current
+quarter. `attachments` is an alias for `materials`:
+
+```bash
+canvas materials --dry-run
+canvas materials
+canvas attachments --student '<student name>'
+canvas materials --all-periods
+```
+
+Files and a manifest are stored under the Git-ignored `data/materials/`
+directory. Only files hosted by this Canvas instance and linked from matching
+assignments are downloaded; arbitrary external links and student-submitted work
+are not included. Use `--refresh` to download files again or `--limit` to adjust
+the maximum number of unique files processed.
+
 Use `--json` to also save a timestamped JSON snapshot, or `--output PATH` to
 choose a snapshot path:
 

@@ -6,10 +6,21 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from canvas_query import show_alerts, show_assignments, show_history, show_not_submitted, show_upcoming
+from canvas_materials import canvas_file_ids
 from canvas_scraper import store_observed_data
 
 
 class AssignmentQueryTests(unittest.TestCase):
+    def test_assignment_material_links_only_include_canvas_hosted_files(self):
+        assignment = {
+            "description": (
+                '<a href="/courses/12/files/34/download?wrap=1">handout</a>'
+                '<a data-api-endpoint="/api/v1/courses/12/files/56">slides</a>'
+                '<img src="https://files.example.org/files/78/image.png">'
+            )
+        }
+        self.assertEqual(canvas_file_ids(assignment, "https://canvas.example.edu"), {34, 56})
+
     def test_show_assignments_includes_grade_and_status(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             database = Path(temporary_directory) / "canvas.sqlite3"

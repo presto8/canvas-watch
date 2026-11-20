@@ -31,6 +31,8 @@ Commands:
                        Show upcoming deadlines (next 7 days by default)
   history [--limit N] [--student NAME]
                        Show recent sync runs and grade/submission changes
+  materials [options]   Download assignment-linked Canvas files
+  attachments [options] Alias for materials
   students             Alias for 'list students'
   classes              Alias for 'list classes'
   help                 Show this help
@@ -68,6 +70,9 @@ def main() -> None:
     elif command == "history":
         target = ROOT / "canvas_query.py"
         command_args = ["history", *args]
+    elif command in ("materials", "attachments"):
+        target = ROOT / "canvas_materials.py"
+        command_args = args
     elif command == "students":
         target = ROOT / "canvas_query.py"
         command_args = ["students", *args]
