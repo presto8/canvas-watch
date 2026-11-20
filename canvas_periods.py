@@ -3,21 +3,70 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
 
 
 def parse_period_selector(quarter: str | None, semester: str | None) -> dict:
     if quarter:
-        match = re.fullmatch(r"(\d{4})-Q([1-4])", quarter.strip(), re.IGNORECASE)
-        if not match:
-            raise ValueError("Quarter must use the format YYYY-Q1 through YYYY-Q4, e.g. 2020-Q1.")
-        return {"academic_year": int(match.group(1)), "quarter_number": int(match.group(2)), "semester_number": None}
+        return _parse_period(quarter, "Q")
     if semester:
-        match = re.fullmatch(r"(\d{4})-S([1-2])", semester.strip(), re.IGNORECASE)
-        if not match:
-            raise ValueError("Semester must use the format YYYY-S1 or YYYY-S2, e.g. 2020-S1.")
-        return {"academic_year": int(match.group(1)), "quarter_number": None, "semester_number": int(match.group(2))}
-    return {"academic_year": None, "quarter_number": None, "semester_number": None}
+        return _parse_period(semester, "S")
+    return {
+        "academic_year": None,
+        "grade_level": None,
+        "grade_label": None,
+        "quarter_number": None,
+        "semester_number": None,
+    }
+
+
+def selector_requested(selector: dict) -> bool:
+    return selector.get("academic_year") is not None or selector.get("grade_level") is not None
+
+
+def students_without_graduation_year(db_path: Path, student_filter: str | None = None) -> list[str]:
+    with sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True) as connection:
+        rows = connection.execute("""
+            SELECT s.name
+            FROM students AS s
+            WHERE s.graduation_year IS NULL
+              AND EXISTS (SELECT 1 FROM course_scrapes AS cs WHERE cs.student_id=s.id)
+              AND (:student IS NULL OR lower(s.name) LIKE '%' || lower(:student) || '%')
+            ORDER BY s.name
+        """, {"student": student_filter}).fetchall()
+    return [row[0] for row in rows]
+
+
+def _parse_period(value: str, kind: str) -> dict:
+    match = re.fullmatch(r"(\d{4}|K|Kindergarten|\d{1,2}(?:st|nd|rd|th)?)-" + kind + r"([1-4])", value.strip(), re.IGNORECASE)
+    maximum = 4 if kind == "Q" else 2
+    if not match or int(match.group(2)) > maximum:
+        label = "quarter YYYY-Q1 through YYYY-Q4 or grade-Q1 through grade-Q4" if kind == "Q" else "semester YYYY-S1/S2 or grade-S1/S2"
+        raise ValueError(f"Invalid period selector {value!r}; use {label}, e.g. 2020-Q1 or 10th-Q1.")
+
+    scope, number = match.groups()
+    number = int(number)
+    if scope.isdigit() and len(scope) == 4:
+        year_fields = {"academic_year": int(scope), "grade_level": None, "grade_label": None}
+    elif scope.casefold() in {"k", "kindergarten"}:
+        year_fields = {"academic_year": None, "grade_level": 0, "grade_label": "Kindergarten"}
+    else:
+        grade_match = re.fullmatch(r"(\d{1,2})(st|nd|rd|th)?", scope, re.IGNORECASE)
+        grade_level = int(grade_match.group(1))
+        if not 1 <= grade_level <= 12:
+            raise ValueError("Grade-level selectors must use K or grades 1–12.")
+        expected = "th" if 11 <= grade_level % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(grade_level % 10, "th")
+        if grade_match.group(2) and grade_match.group(2).casefold() != expected:
+            raise ValueError(f"Use the correct ordinal suffix for grade {grade_level} ({grade_level}{expected}).")
+        year_fields = {"academic_year": None, "grade_level": grade_level, "grade_label": f"{grade_level}{expected}"}
+
+    return {
+        **year_fields,
+        "quarter_number": number if kind == "Q" else None,
+        "semester_number": number if kind == "S" else None,
+    }
 
 
 def academic_year_start(course: dict) -> int | None:
@@ -36,10 +85,17 @@ def academic_year_start(course: dict) -> int | None:
     return start_date.year - 1 if start_date.month < 7 else start_date.year
 
 
-def select_grading_periods(periods, course: dict, current_period_id: int | None, selector: dict) -> list[dict]:
+def select_grading_periods(periods, course: dict, current_period_id: int | None, selector: dict,
+                           graduation_year: int | None = None) -> list[dict]:
     """Select Canvas grading periods for the current period or requested school year."""
     normalized = [dict(period) for period in periods]
     academic_year = selector.get("academic_year")
+    if academic_year is None:
+        grade_level = selector.get("grade_level")
+        if grade_level is not None:
+            if graduation_year is None:
+                return []
+            academic_year = graduation_year + grade_level - 13
     if academic_year is None:
         return [period for period in normalized if period.get("id") == current_period_id]
     if academic_year_start(course) != academic_year:

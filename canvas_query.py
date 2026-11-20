@@ -15,7 +15,13 @@ from pathlib import Path
 import textwrap
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from canvas_periods import assignment_matches_period, parse_period_selector, select_grading_periods
+from canvas_periods import (
+    assignment_matches_period,
+    parse_period_selector,
+    select_grading_periods,
+    selector_requested,
+    students_without_graduation_year,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -29,8 +35,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--all-periods", "--all-classes", dest="all_periods", action="store_true",
                         help="Include assignments outside the current grading period in show/missing views")
     period_group = parser.add_mutually_exclusive_group()
-    period_group.add_argument("--quarter", metavar="YYYY-QN", help="Select a school-year quarter, e.g. 2020-Q1")
-    period_group.add_argument("--semester", metavar="YYYY-SN", help="Select two quarters, e.g. 2020-S1")
+    period_group.add_argument("--quarter", metavar="YEAR/GRADE-QN",
+                              help="Select a school-year or grade-based quarter, e.g. 2020-Q1 or 10th-Q1")
+    period_group.add_argument("--semester", metavar="YEAR/GRADE-SN",
+                              help="Select two quarters, e.g. 2020-S1 or 10th-S1")
     parser.add_argument("--threshold", type=float, default=90.0, help="Low-grade percentage threshold (default: 90)")
     parser.add_argument("--days", type=int, default=7, help="Upcoming deadline window in days (default: 7)")
     parser.add_argument("--include-submitted", action="store_true", help="Include assignments already submitted or graded")
@@ -131,12 +139,24 @@ def set_student_graduation_year(db_path: Path, student_query: str, graduation_ye
 def period_scope(selector: dict, all_periods: bool) -> str:
     if all_periods:
         return "all stored periods"
+    grade_level = selector.get("grade_level")
+    if grade_level is not None:
+        if selector.get("quarter_number") is not None:
+            return f"{selector['grade_label']}-Q{selector['quarter_number']} (per student's graduation year)"
+        return f"{selector['grade_label']}-S{selector['semester_number']} (per student's graduation year)"
     year = selector.get("academic_year")
     if year is None:
         return "current quarter"
     if selector.get("quarter_number") is not None:
         return f"{year}-Q{selector['quarter_number']}"
     return f"{year}-S{selector['semester_number']}"
+
+
+def warn_unconfigured_students(names: list[str]) -> None:
+    if names:
+        joined = ", ".join(names)
+        print(f"\nSkipped students without a saved graduation year: {joined}.")
+        print("Set one with `canvas student set --student NAME --graduation-year YYYY`.")
 
 
 def teacher_comments(submission: dict, student_id: int) -> list[dict]:
@@ -168,7 +188,7 @@ def show_assignments(db_path: Path, student_query: str, course_query: str,
     connection.row_factory = sqlite3.Row
     try:
         student_matches = connection.execute(
-            "SELECT id, name FROM students WHERE lower(name) LIKE ? ORDER BY name",
+            "SELECT id, name, graduation_year FROM students WHERE lower(name) LIKE ? ORDER BY name",
             (f"%{student_query.casefold()}%",),
         ).fetchall()
         if not student_matches:
@@ -225,7 +245,8 @@ def show_assignments(db_path: Path, student_query: str, course_query: str,
             """, (run_id, student["id"], course_id)).fetchall()
             selector = period_selector or parse_period_selector(None, None)
             periods = select_grading_periods(
-                period_rows, metadata, enrollment_data.get("current_grading_period_id"), selector
+                period_rows, metadata, enrollment_data.get("current_grading_period_id"), selector,
+                student["graduation_year"],
             )
             period_label = ""
             if all_periods:
@@ -238,7 +259,10 @@ def show_assignments(db_path: Path, student_query: str, course_query: str,
                 print("  Note: Canvas provided partial data for this course.")
 
             if not all_periods and not periods:
-                print("  Requested Canvas grading period is unavailable. Run `canvas sync` to refresh or select another period.")
+                if selector.get("grade_level") is not None and student["graduation_year"] is None:
+                    print("  Cannot resolve grade-level period; set this student's graduation year first.")
+                else:
+                    print("  Requested Canvas grading period is unavailable. Run `canvas sync` to refresh or select another period.")
                 continue
 
             assignment_sql = """
@@ -330,7 +354,7 @@ def show_comments(db_path: Path, student_filter: str | None = None, course_filte
                 SELECT student_id, course_id, MAX(scrape_run_id) AS run_id
                 FROM course_scrapes GROUP BY student_id, course_id
             )
-            SELECT s.id AS student_id, s.name AS student, cs.course_id,
+            SELECT s.id AS student_id, s.name AS student, s.graduation_year, cs.course_id,
                    COALESCE(c.name, 'Course ' || cs.course_id) AS course,
                    a.assignment_id, a.name AS assignment, a.raw_json AS assignment_json,
                    cs.raw_course_json AS course_json, e.raw_json AS enrollment_json,
@@ -365,14 +389,17 @@ def show_comments(db_path: Path, student_filter: str | None = None, course_filte
 
     comments = []
     selector = period_selector or parse_period_selector(None, None)
+    missing_year_students = set()
     for row in rows:
         assignment = json.loads(row["assignment_json"] or "{}")
         submission = json.loads(row["submission_json"] or "{}")
         enrollment = json.loads(row["enrollment_json"] or "{}")
         course_data = json.loads(row["course_json"] or "{}")
+        if selector.get("grade_level") is not None and row["graduation_year"] is None:
+            missing_year_students.add(row["student"])
         periods = select_grading_periods(
             json.loads(row["periods_json"] or "[]"), course_data,
-            enrollment.get("current_grading_period_id"), selector,
+            enrollment.get("current_grading_period_id"), selector, row["graduation_year"],
         )
         if not all_periods and not assignment_matches_period(assignment, submission, periods):
             continue
@@ -382,6 +409,8 @@ def show_comments(db_path: Path, student_filter: str | None = None, course_filte
     scope = period_scope(selector, all_periods)
     if not comments:
         print(f"No non-student assignment comments found in the {scope}.")
+        if missing_year_students:
+            print(f"Skipped {len(missing_year_students)} student(s) without a saved graduation year.")
         return 0
     print(f"Assignment comments in the {scope}: {len(comments)}")
     for row, comment in comments:
@@ -392,6 +421,8 @@ def show_comments(db_path: Path, student_filter: str | None = None, course_filte
         print(textwrap.fill(comment["text"], width=96, initial_indent="  ", subsequent_indent="  "))
         if comment["attachments"]:
             print(f"  [comment attachment(s): {len(comment['attachments'])}]")
+    if missing_year_students:
+        print(f"\nSkipped {len(missing_year_students)} student(s) without a saved graduation year.")
     return 0
 
 
@@ -461,6 +492,8 @@ def show_not_submitted(db_path: Path, student_filter: str | None = None, all_per
             f"\nNote: {partial_count} latest course record(s) have partial Canvas data; "
             "assignments hidden from the signed-in account cannot appear in this result."
         )
+    if selector.get("grade_level") is not None:
+        warn_unconfigured_students(students_without_graduation_year(db_path, student_filter))
     return 0
 
 
@@ -523,6 +556,8 @@ def show_alerts(
             flag += "*"
         print(f"{student:24} {course:36} {assignment:42} {score:14} {percentage:10} {due:12} {flag}")
     print("\nPercentages use Canvas score ÷ points possible. Letter-only grades without numeric scores may not be comparable.")
+    if selector.get("grade_level") is not None:
+        warn_unconfigured_students(students_without_graduation_year(db_path, student_filter))
     return 0
 
 
@@ -590,6 +625,8 @@ def show_upcoming(
         if row["data_status"] == "partial":
             status += "*"
         print(f"{student:24} {course:36} {assignment:42} {due:25} {status}")
+    if selector.get("grade_level") is not None:
+        warn_unconfigured_students(students_without_graduation_year(db_path, student_filter))
     return 0
 
 
@@ -762,14 +799,14 @@ def main() -> int:
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    if args.all_periods and selector["academic_year"] is not None:
+    if args.all_periods and selector_requested(selector):
         print("Use either --all-periods or --quarter/--semester, not both.", file=sys.stderr)
         return 2
     if args.view == "student-set":
         if not args.student or args.graduation_year is None:
             print("Set a student's year with: canvas student set --student NAME --graduation-year YYYY", file=sys.stderr)
             return 2
-        if args.all_periods or selector["academic_year"] is not None:
+        if args.all_periods or selector_requested(selector):
             print("Period selectors do not apply to student settings.", file=sys.stderr)
             return 2
         if not args.db.is_file():
@@ -777,12 +814,17 @@ def main() -> int:
             return 2
         return set_student_graduation_year(args.db, args.student, args.graduation_year)
     period_views = {"assignments", "comments", "not-submitted", "alerts", "upcoming"}
-    if (args.all_periods or selector["academic_year"] is not None) and args.view not in period_views:
+    if (args.all_periods or selector_requested(selector)) and args.view not in period_views:
         print("Period selectors apply to assignment, comment, alert, and deadline views.", file=sys.stderr)
         return 2
     if not args.db.is_file():
         print(f"Database not found: {args.db}. Run canvas_scraper.py first.", file=sys.stderr)
         return 2
+    try:
+        ensure_graduation_year_column(args.db)
+    except (sqlite3.Error, OSError) as exc:
+        print(f"Could not update student schema: {exc}", file=sys.stderr)
+        return 1
 
     if args.view == "assignments":
         if not args.student or not args.course:
@@ -805,12 +847,6 @@ def main() -> int:
                              args.include_submitted, selector)
     if args.view == "history":
         return show_history(args.db, args.student, args.limit)
-
-    try:
-        ensure_graduation_year_column(args.db)
-    except (sqlite3.Error, OSError) as exc:
-        print(f"Could not update student schema: {exc}", file=sys.stderr)
-        return 1
 
     try:
         connection = sqlite3.connect(f"file:{args.db.resolve()}?mode=ro", uri=True)

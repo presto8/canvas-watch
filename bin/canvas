@@ -23,21 +23,19 @@ Commands:
                        Show observed students and/or their current classes
   student set --student NAME --graduation-year YYYY
                        Save a student's expected graduation year locally
-  show --student NAME --course NAME [--quarter YYYY-QN | --semester YYYY-SN | --all-periods]
+  show --student NAME --course NAME [--quarter YEAR/GRADE-QN | --semester YEAR/GRADE-SN | --all-periods]
                        Show assignments and grades for a selected school period
-  comments [--student NAME] [--course NAME] [--quarter YYYY-QN | --semester YYYY-SN | --all-periods]
+  comments [--student NAME] [--course NAME] [--quarter YEAR/GRADE-QN | --semester YEAR/GRADE-SN | --all-periods]
                        Show non-student comments on assignments
-  missing [--student NAME] [--quarter YYYY-QN | --semester YYYY-SN | --all-periods]
+  missing [--student NAME] [--quarter YEAR/GRADE-QN | --semester YEAR/GRADE-SN | --all-periods]
                        Find unsubmitted assignments in the selected/current period
-  alerts [--student NAME] [--threshold PCT] [--quarter YYYY-QN | --semester YYYY-SN | --all-periods]
+  alerts [--student NAME] [--threshold PCT] [--quarter YEAR/GRADE-QN | --semester YEAR/GRADE-SN | --all-periods]
                        Find assignments below 90% or marked missing
-  upcoming [--days N] [--student NAME] [--quarter YYYY-QN | --semester YYYY-SN | --all-periods]
+  upcoming [--days N] [--student NAME] [--quarter YEAR/GRADE-QN | --semester YEAR/GRADE-SN | --all-periods]
                        Show upcoming deadlines (next 7 days, within selected period)
   history [--limit N] [--student NAME]
                        Show recent sync runs and grade/submission changes
-  student set --student NAME --graduation-year YYYY
-                       Save a student's expected graduation year locally
-  materials [--quarter YYYY-QN | --semester YYYY-SN | --all-periods]
+  materials [--quarter YEAR/GRADE-QN | --semester YEAR/GRADE-SN | --all-periods]
                        Download assignment-linked Canvas files
   attachments [options] Alias for materials
   students             Alias for 'list students'

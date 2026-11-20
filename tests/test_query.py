@@ -54,6 +54,19 @@ class AssignmentQueryTests(unittest.TestCase):
         self.assertEqual([period["id"] for period in semester1], [1, 2])
         self.assertEqual([period["id"] for period in semester2], [3, 4])
         self.assertEqual(select_grading_periods(periods, course, None, parse_period_selector("2019-Q1", None)), [])
+        high_school_course = {"term": {"name": "2026/2027 - High School"}}
+        tenth_grade_q1 = select_grading_periods(
+            periods, high_school_course, None, parse_period_selector("10th-Q1", None), 2029
+        )
+        tenth_grade_s1 = select_grading_periods(
+            periods, high_school_course, None, parse_period_selector(None, "10th-S1"), 2029
+        )
+        eighth_grade_q1 = select_grading_periods(
+            periods, high_school_course, None, parse_period_selector("8th-Q1", None), 2031
+        )
+        self.assertEqual([period["id"] for period in tenth_grade_q1], [1])
+        self.assertEqual([period["id"] for period in tenth_grade_s1], [1, 2])
+        self.assertEqual([period["id"] for period in eighth_grade_q1], [1])
 
     def test_teacher_comments_excludes_student_authored_replies(self):
         comments = teacher_comments({
@@ -203,7 +216,7 @@ class AssignmentQueryTests(unittest.TestCase):
                         "course": {
                             "id": 11,
                             "name": "Test Course",
-                            "term": {"name": "2020/2021 - Test Term"},
+                            "term": {"name": "2026/2027 - Test Term"},
                             "enrollments": [{
                                 "role": "ObserverEnrollment",
                                 "enrollment_state": "active",
@@ -213,26 +226,28 @@ class AssignmentQueryTests(unittest.TestCase):
                         "data_status": "available",
                         "grading_periods": [{
                             "id": 7,
-                            "title": "Quarter 1",
-                            "start_date": "2020-01-01T00:00:00Z",
-                            "end_date": "2099-12-31T23:59:59Z",
+                            "title": "Q1",
+                            "start_date": "2026-08-01T00:00:00Z",
+                            "end_date": "2026-10-31T23:59:59Z",
                         }],
                         "assignments": [
-                            {"id": 101, "name": "Low Score", "points_possible": 10, "due_at": "2026-01-10T00:00:00Z"},
-                            {"id": 102, "name": "Missing Work", "points_possible": 10, "due_at": "2026-01-11T00:00:00Z"},
-                            {"id": 103, "name": "Good Score", "points_possible": 100, "due_at": "2026-01-12T00:00:00Z"},
+                            {"id": 101, "name": "Low Score", "points_possible": 10, "due_at": "2026-10-10T00:00:00Z"},
+                            {"id": 102, "name": "Missing Work", "points_possible": 10, "due_at": "2026-10-11T00:00:00Z"},
+                            {"id": 103, "name": "Good Score", "points_possible": 100, "due_at": "2026-10-12T00:00:00Z"},
                         ],
                         "submissions": [
-                            {"id": 201, "assignment_id": 101, "score": 8, "grade": "8", "graded_at": "2026-01-10T00:00:00Z"},
-                            {"id": 203, "assignment_id": 103, "score": 95, "grade": "95", "graded_at": "2026-01-12T00:00:00Z"},
+                            {"id": 201, "assignment_id": 101, "score": 8, "grade": "8", "graded_at": "2026-10-10T00:00:00Z"},
+                            {"id": 203, "assignment_id": 103, "score": 95, "grade": "95", "graded_at": "2026-10-12T00:00:00Z"},
                         ],
                     }],
                 }],
             }, database)
+            with sqlite3.connect(database) as connection:
+                connection.execute("UPDATE students SET graduation_year=2029 WHERE id=7")
 
             output = io.StringIO()
             with redirect_stdout(output):
-                result = show_alerts(database, period_selector=parse_period_selector("2020-Q1", None))
+                result = show_alerts(database, period_selector=parse_period_selector("10th-Q1", None))
 
             self.assertEqual(result, 0)
             self.assertIn("Low Score", output.getvalue())
@@ -240,6 +255,7 @@ class AssignmentQueryTests(unittest.TestCase):
             self.assertIn("Missing Work", output.getvalue())
             self.assertIn("Missing", output.getvalue())
             self.assertNotIn("Good Score", output.getvalue())
+            self.assertIn("10th-Q1 (per student's graduation year)", output.getvalue())
 
     def test_upcoming_query_defaults_to_unsubmitted_work(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

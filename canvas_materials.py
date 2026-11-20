@@ -18,7 +18,13 @@ from urllib.parse import urljoin, urlparse
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
-from canvas_periods import assignment_matches_period, parse_period_selector, select_grading_periods
+from canvas_periods import (
+    assignment_matches_period,
+    parse_period_selector,
+    select_grading_periods,
+    selector_requested,
+    students_without_graduation_year,
+)
 from canvas_scraper import login_if_needed
 
 FILE_ID_PATTERN = re.compile(r"/files/(\d+)(?:/|$)")
@@ -95,7 +101,8 @@ def find_assignment_files(db_path: Path, origin: str, student_filter: str | None
                 SELECT student_id, course_id, MAX(scrape_run_id) AS run_id
                 FROM course_scrapes GROUP BY student_id, course_id
             )
-            SELECT s.name AS student, cs.course_id, COALESCE(c.name, 'Course ' || cs.course_id) AS course,
+            SELECT s.name AS student, s.graduation_year, cs.course_id,
+                   COALESCE(c.name, 'Course ' || cs.course_id) AS course,
                    cs.scrape_run_id, a.assignment_id, a.name AS assignment, a.raw_json AS assignment_json,
                    cs.raw_course_json AS course_json, e.raw_json AS enrollment_json,
             (SELECT json_group_array(json_object('id', p.grading_period_id, 'title', p.title,
@@ -133,7 +140,7 @@ def find_assignment_files(db_path: Path, origin: str, student_filter: str | None
         course_data = json.loads(row["course_json"] or "{}")
         periods = select_grading_periods(
             json.loads(row["periods_json"] or "[]"), course_data,
-            enrollment.get("current_grading_period_id"), period_selector,
+            enrollment.get("current_grading_period_id"), period_selector, row["graduation_year"],
         )
         if not all_periods and not assignment_matches_period(assignment, submission, periods):
             continue
@@ -274,7 +281,7 @@ def main() -> int:
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    if args.all_periods and period_selector["academic_year"] is not None:
+    if args.all_periods and selector_requested(period_selector):
         print("Use either --all-periods or --quarter/--semester, not both.", file=sys.stderr)
         return 2
     if not 1 <= args.limit <= 5000:
@@ -305,10 +312,19 @@ def main() -> int:
         return 2
     if not references:
         print("No Canvas-hosted files linked from matching assignments were found.")
+        if period_selector.get("grade_level") is not None:
+            warn_names = students_without_graduation_year(args.db, args.student)
+            if warn_names:
+                print("Students without saved graduation years were skipped: " + ", ".join(warn_names))
         return 0
     reference_count = sum(len(items) for items in references.values())
     if args.all_periods:
         scope = "all stored periods"
+    elif period_selector["grade_level"] is not None:
+        if period_selector["quarter_number"] is not None:
+            scope = f"{period_selector['grade_label']}-Q{period_selector['quarter_number']} (per student)"
+        else:
+            scope = f"{period_selector['grade_label']}-S{period_selector['semester_number']} (per student)"
     elif period_selector["academic_year"] is None:
         scope = "current quarter"
     elif period_selector["quarter_number"] is not None:
@@ -316,6 +332,10 @@ def main() -> int:
     else:
         scope = f"{period_selector['academic_year']}-S{period_selector['semester_number']}"
     print(f"Found {len(references)} unique Canvas file(s) across {reference_count} assignment link(s) ({scope}).")
+    if period_selector.get("grade_level") is not None:
+        warn_names = students_without_graduation_year(args.db, args.student)
+        if warn_names:
+            print("Students without saved graduation years were skipped: " + ", ".join(warn_names))
     if args.dry_run:
         print("Dry run: no files downloaded. Use `canvas materials` to download them.")
         return 0

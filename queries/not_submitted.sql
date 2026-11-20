@@ -44,16 +44,16 @@ WHERE COALESCE(json_extract(a.raw_json, '$.published'), 1) <> 0
             AND target_gp.student_id = cs.student_id
             AND target_gp.course_id = cs.course_id
             AND (
-                (:academic_year IS NULL AND target_gp.grading_period_id =
-                    CAST(json_extract(e.raw_json, '$.current_grading_period_id') AS INTEGER))
-                OR (
-                    :academic_year IS NOT NULL
+                    (:academic_year IS NULL AND :grade_level IS NULL AND target_gp.grading_period_id =
+                        CAST(json_extract(e.raw_json, '$.current_grading_period_id') AS INTEGER))
+                    OR (
+                        (:academic_year IS NOT NULL OR :grade_level IS NOT NULL)
                     AND CASE
                         WHEN json_extract(cs.raw_course_json, '$.term.name') GLOB '[0-9][0-9][0-9][0-9]/[0-9][0-9][0-9][0-9]*'
                             THEN CAST(substr(json_extract(cs.raw_course_json, '$.term.name'), 1, 4) AS INTEGER)
                         ELSE CAST(strftime('%Y', COALESCE(json_extract(cs.raw_course_json, '$.term.start_at'), json_extract(cs.raw_course_json, '$.start_at'))) AS INTEGER)
                              - CASE WHEN CAST(strftime('%m', COALESCE(json_extract(cs.raw_course_json, '$.term.start_at'), json_extract(cs.raw_course_json, '$.start_at'))) AS INTEGER) < 7 THEN 1 ELSE 0 END
-                    END = :academic_year
+                    END = COALESCE(:academic_year, s.graduation_year + :grade_level - 13)
                     AND (
                         (:quarter_number = 1 AND lower(target_gp.title) IN ('quarter 1', 'q1'))
                         OR (:quarter_number = 2 AND lower(target_gp.title) IN ('quarter 2', 'q2'))

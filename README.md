@@ -85,7 +85,12 @@ the quarter). The course name can be a partial match:
 
 Use the school-year start year for explicit periods: `2020-Q1` means Quarter 1
 of the 2020–2021 school year. `2020-S1` means Q1+Q2, and `2020-S2` means Q3+Q4.
-Selectors use Canvas grading-period dates and course-term metadata.
+Selectors use Canvas grading-period dates and course-term metadata. Once a
+student has a saved graduation year, grade-based selectors such as `10th-Q1` or
+`8th-S1` resolve to the appropriate school year separately for each student.
+For example, the same `Q1` selector can resolve to different school years for
+students in different grades. Students without a saved graduation year are
+skipped with a warning.
 `--quarter` and `--semester` are mutually exclusive with each other and with
 `--all-periods`. If Canvas has no matching grading-period record for a course,
 that course is omitted rather than guessed.
@@ -112,6 +117,8 @@ canvas missing
 canvas missing --student '<student name>'
 canvas missing --quarter 2020-Q1
 canvas missing --semester 2020-S1
+canvas missing --quarter 10th-Q1
+canvas alerts --semester 8th-S1
 ```
 
 Add `--all-periods` to include assignments from past and undated periods. The reusable SQLite
