@@ -114,6 +114,14 @@ canvas upcoming --include-submitted
 Use `--all-periods` to look beyond the current quarter. The query is in
 `queries/upcoming.sql`.
 
+Review recent syncs and grade/submission changes:
+
+```bash
+canvas history
+canvas history --limit 20
+canvas history --student '<student name>'
+```
+
 Use `--json` to also save a timestamped JSON snapshot, or `--output PATH` to
 choose a snapshot path:
 

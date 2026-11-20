@@ -5,7 +5,7 @@ from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from canvas_query import show_alerts, show_assignments, show_not_submitted, show_upcoming
+from canvas_query import show_alerts, show_assignments, show_history, show_not_submitted, show_upcoming
 from canvas_scraper import store_observed_data
 
 
@@ -226,6 +226,47 @@ class AssignmentQueryTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertIn("Due Soon", output.getvalue())
             self.assertIn("Already Submitted", output.getvalue())
+
+    def test_history_shows_grade_changes_between_syncs(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "canvas.sqlite3"
+            data = {
+                "scraped_at": "2026-01-01T00:00:00+00:00",
+                "source": "Canvas authenticated API",
+                "students": [{
+                    "student": {"id": 7, "name": "Test Student"},
+                    "courses": [{
+                        "course": {
+                            "id": 11,
+                            "name": "Test Course",
+                            "enrollments": [{"role": "ObserverEnrollment", "enrollment_state": "active"}],
+                        },
+                        "data_status": "available",
+                        "assignments": [{"id": 101, "name": "Quiz", "points_possible": 10}],
+                        "submissions": [{
+                            "id": 201,
+                            "assignment_id": 101,
+                            "score": 5,
+                            "grade": "5",
+                            "graded_at": "2026-01-01T00:00:00Z",
+                        }],
+                    }],
+                }],
+            }
+            store_observed_data(data, database)
+            data["scraped_at"] = "2026-01-02T00:00:00+00:00"
+            data["students"][0]["courses"][0]["submissions"][0]["score"] = 8
+            data["students"][0]["courses"][0]["submissions"][0]["grade"] = "8"
+            store_observed_data(data, database)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                result = show_history(database)
+
+            self.assertEqual(result, 0)
+            self.assertIn("Recent syncs", output.getvalue())
+            self.assertIn("Recent grade/submission changes", output.getvalue())
+            self.assertIn("grade 5/10 → 8/10", output.getvalue())
 
 
 if __name__ == "__main__":

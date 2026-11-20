@@ -29,6 +29,8 @@ Commands:
                        Find assignments below 90% or marked missing
   upcoming [--days N] [--student NAME] [--all-periods]
                        Show upcoming deadlines (next 7 days by default)
+  history [--limit N] [--student NAME]
+                       Show recent sync runs and grade/submission changes
   students             Alias for 'list students'
   classes              Alias for 'list classes'
   help                 Show this help
@@ -63,6 +65,9 @@ def main() -> None:
     elif command == "upcoming":
         target = ROOT / "canvas_query.py"
         command_args = ["upcoming", *args]
+    elif command == "history":
+        target = ROOT / "canvas_query.py"
+        command_args = ["history", *args]
     elif command == "students":
         target = ROOT / "canvas_query.py"
         command_args = ["students", *args]

@@ -14,8 +14,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("view", nargs="?", choices=("all", "students", "classes", "assignments", "not-submitted", "alerts", "upcoming"), default="all",
-                        help="Show students, classes, grades, missing/low-grade alerts, or upcoming deadlines")
+    parser.add_argument("view", nargs="?", choices=("all", "students", "classes", "assignments", "not-submitted", "alerts", "upcoming", "history"), default="all",
+                        help="Show students, classes, grades, alerts, upcoming deadlines, or recent history")
     parser.add_argument("--db", type=Path, default=Path("data/canvas.sqlite3"), help="SQLite database path")
     parser.add_argument("--student", help="Show only a student whose name contains this text")
     parser.add_argument("--course", help="Course name or ID (required for assignments view)")
@@ -24,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--threshold", type=float, default=90.0, help="Low-grade percentage threshold (default: 90)")
     parser.add_argument("--days", type=int, default=7, help="Upcoming deadline window in days (default: 7)")
     parser.add_argument("--include-submitted", action="store_true", help="Include assignments already submitted or graded")
+    parser.add_argument("--limit", type=int, default=10, help="Number of recent runs/changes to show (default: 10)")
     parser.add_argument("--as-of", type=date.fromisoformat, default=date.today(), metavar="YYYY-MM-DD",
                         help="Date used to determine current terms (default: today)")
     return parser.parse_args()
@@ -365,6 +366,134 @@ def show_upcoming(
     return 0
 
 
+def show_history(db_path: Path, student_filter: str | None = None, limit: int = 10) -> int:
+    if not 1 <= limit <= 100:
+        print("--limit must be between 1 and 100.", file=sys.stderr)
+        return 2
+    try:
+        connection = sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+    except sqlite3.Error as exc:
+        print(f"Could not open database: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        runs = connection.execute("""
+            SELECT r.id, r.scraped_at, r.source,
+                   COUNT(DISTINCT cs.student_id) AS students,
+                   COUNT(cs.course_id) AS courses,
+                   COALESCE(SUM(cs.assignment_count), 0) AS assignments,
+                   COALESCE(SUM(cs.submission_count), 0) AS submissions
+            FROM scrape_runs AS r
+            LEFT JOIN course_scrapes AS cs ON cs.scrape_run_id = r.id
+            LEFT JOIN students AS s ON s.id = cs.student_id
+            WHERE (:student IS NULL OR lower(s.name) LIKE '%' || lower(:student) || '%')
+            GROUP BY r.id
+            ORDER BY r.id DESC
+            LIMIT :limit
+        """, {"student": student_filter, "limit": limit}).fetchall()
+
+        changes = connection.execute("""
+            WITH ranked AS (
+                SELECT sub.*,
+                       r.scraped_at,
+                       LAG(sub.scrape_run_id) OVER w AS previous_run_id,
+                       LAG(sub.score) OVER w AS previous_score,
+                       LAG(sub.grade) OVER w AS previous_grade,
+                       LAG(sub.submitted_at) OVER w AS previous_submitted_at,
+                       LAG(sub.graded_at) OVER w AS previous_graded_at,
+                       json_extract(sub.raw_json, '$.missing') AS missing_flag,
+                       json_extract(sub.raw_json, '$.late') AS late_flag,
+                       LAG(json_extract(sub.raw_json, '$.missing')) OVER w AS previous_missing,
+                       LAG(json_extract(sub.raw_json, '$.late')) OVER w AS previous_late
+                FROM submissions AS sub
+                JOIN scrape_runs AS r ON r.id = sub.scrape_run_id
+                JOIN students AS s ON s.id = sub.student_id
+                WHERE (:student IS NULL OR lower(s.name) LIKE '%' || lower(:student) || '%')
+                WINDOW w AS (
+                    PARTITION BY sub.student_id, sub.course_id, sub.assignment_id
+                    ORDER BY sub.scrape_run_id
+                )
+            )
+            SELECT ranked.*, s.name AS student, c.name AS course,
+                   a.name AS assignment, a.points_possible
+            FROM ranked
+            JOIN students AS s ON s.id = ranked.student_id
+            LEFT JOIN courses AS c ON c.id = ranked.course_id
+            LEFT JOIN assignments AS a
+              ON a.scrape_run_id = ranked.scrape_run_id
+             AND a.student_id = ranked.student_id
+             AND a.course_id = ranked.course_id
+             AND a.assignment_id = ranked.assignment_id
+            WHERE previous_run_id IS NOT NULL
+              AND (
+                  score IS NOT previous_score
+                  OR grade IS NOT previous_grade
+                  OR submitted_at IS NOT previous_submitted_at
+                  OR graded_at IS NOT previous_graded_at
+                  OR json_extract(ranked.raw_json, '$.missing') IS NOT previous_missing
+                  OR json_extract(ranked.raw_json, '$.late') IS NOT previous_late
+              )
+            ORDER BY ranked.scrape_run_id DESC, student, course, assignment
+            LIMIT :limit
+        """, {"student": student_filter, "limit": limit}).fetchall()
+    except sqlite3.Error as exc:
+        print(f"Could not query history: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        connection.close()
+
+    if student_filter and not runs:
+        print(f"No sync history found for student matching {student_filter!r}.")
+        return 0
+
+    print("Recent syncs")
+    if not runs:
+        print("  No sync runs recorded yet.")
+    else:
+        for run in runs:
+            print(
+                f"  #{run['id']}  {run['scraped_at']}  "
+                f"{run['students']} students, {run['courses']} courses, "
+                f"{run['assignments']} assignments, {run['submissions']} submissions"
+            )
+
+    print("\nRecent grade/submission changes")
+    if not changes:
+        print("  No grade or submission changes detected between stored syncs.")
+        return 0
+    for change in changes:
+        before = change["previous_grade"]
+        if change["previous_score"] is not None:
+            before = f"{change['previous_score']:g}"
+            if change["points_possible"] is not None:
+                before += f"/{change['points_possible']:g}"
+        before = before or "—"
+        after = change["grade"]
+        if change["score"] is not None:
+            after = f"{change['score']:g}"
+            if change["points_possible"] is not None:
+                after += f"/{change['points_possible']:g}"
+        after = after or "—"
+        details = []
+        if change["score"] != change["previous_score"] or change["grade"] != change["previous_grade"]:
+            details.append(f"grade {before} → {after}")
+        if change["submitted_at"] != change["previous_submitted_at"]:
+            details.append("submission updated")
+        if change["graded_at"] != change["previous_graded_at"]:
+            details.append("grading updated")
+        if change["missing_flag"] != change["previous_missing"]:
+            details.append("missing status changed")
+        if change["late_flag"] != change["previous_late"]:
+            details.append("late status changed")
+        assignment_name = change["assignment"] or f"Assignment {change['assignment_id']}"
+        print(
+            f"  {change['scraped_at']}  {change['student']} — {change['course'] or 'Course'} — "
+            f"{assignment_name}: {', '.join(details)}"
+        )
+    return 0
+
+
 def main() -> int:
     args = parse_args()
     if not args.db.is_file():
@@ -386,6 +515,8 @@ def main() -> int:
         return show_alerts(args.db, args.student, args.threshold, args.all_periods)
     if args.view == "upcoming":
         return show_upcoming(args.db, args.student, args.days, args.all_periods, args.include_submitted)
+    if args.view == "history":
+        return show_history(args.db, args.student, args.limit)
 
     try:
         connection = sqlite3.connect(f"file:{args.db.resolve()}?mode=ro", uri=True)
