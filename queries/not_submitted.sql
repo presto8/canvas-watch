@@ -13,8 +13,7 @@ SELECT
         WHEN date(a.due_at) < date('now') THEN 'Overdue'
         ELSE 'Not yet due'
     END AS due_status,
-    cs.data_status,
-    gp.title AS current_period
+    cs.data_status
 FROM latest_course_runs AS latest
 JOIN course_scrapes AS cs
   ON cs.scrape_run_id = latest.scrape_run_id
@@ -26,11 +25,6 @@ JOIN enrollments AS e
   ON e.scrape_run_id = cs.scrape_run_id
  AND e.student_id = cs.student_id
  AND e.course_id = cs.course_id
-LEFT JOIN grading_periods AS gp
-  ON gp.scrape_run_id = e.scrape_run_id
- AND gp.student_id = e.student_id
- AND gp.course_id = e.course_id
- AND gp.grading_period_id = CAST(json_extract(e.raw_json, '$.current_grading_period_id') AS INTEGER)
 JOIN assignments AS a
   ON a.scrape_run_id = cs.scrape_run_id
  AND a.student_id = cs.student_id
@@ -44,10 +38,37 @@ WHERE COALESCE(json_extract(a.raw_json, '$.published'), 1) <> 0
   AND e.enrollment_state = 'active'
   AND (
       :all_periods = 1
-      OR (
-          gp.grading_period_id IS NOT NULL
-          AND a.due_at IS NOT NULL
-          AND datetime(a.due_at) BETWEEN datetime(gp.start_at) AND datetime(gp.end_at)
+      OR EXISTS (
+          SELECT 1 FROM grading_periods AS target_gp
+          WHERE target_gp.scrape_run_id = cs.scrape_run_id
+            AND target_gp.student_id = cs.student_id
+            AND target_gp.course_id = cs.course_id
+            AND (
+                (:academic_year IS NULL AND target_gp.grading_period_id =
+                    CAST(json_extract(e.raw_json, '$.current_grading_period_id') AS INTEGER))
+                OR (
+                    :academic_year IS NOT NULL
+                    AND CASE
+                        WHEN json_extract(cs.raw_course_json, '$.term.name') GLOB '[0-9][0-9][0-9][0-9]/[0-9][0-9][0-9][0-9]*'
+                            THEN CAST(substr(json_extract(cs.raw_course_json, '$.term.name'), 1, 4) AS INTEGER)
+                        ELSE CAST(strftime('%Y', COALESCE(json_extract(cs.raw_course_json, '$.term.start_at'), json_extract(cs.raw_course_json, '$.start_at'))) AS INTEGER)
+                             - CASE WHEN CAST(strftime('%m', COALESCE(json_extract(cs.raw_course_json, '$.term.start_at'), json_extract(cs.raw_course_json, '$.start_at'))) AS INTEGER) < 7 THEN 1 ELSE 0 END
+                    END = :academic_year
+                    AND (
+                        (:quarter_number = 1 AND lower(target_gp.title) IN ('quarter 1', 'q1'))
+                        OR (:quarter_number = 2 AND lower(target_gp.title) IN ('quarter 2', 'q2'))
+                        OR (:quarter_number = 3 AND lower(target_gp.title) IN ('quarter 3', 'q3'))
+                        OR (:quarter_number = 4 AND lower(target_gp.title) IN ('quarter 4', 'q4'))
+                        OR (:semester_number = 1 AND lower(target_gp.title) IN ('quarter 1', 'quarter 2', 'q1', 'q2'))
+                        OR (:semester_number = 2 AND lower(target_gp.title) IN ('quarter 3', 'quarter 4', 'q3', 'q4'))
+                    )
+                )
+            )
+            AND (
+                (a.due_at IS NOT NULL AND datetime(a.due_at) BETWEEN datetime(target_gp.start_at) AND datetime(target_gp.end_at))
+                OR CAST(json_extract(a.raw_json, '$.grading_period_id') AS INTEGER) = target_gp.grading_period_id
+                OR CAST(json_extract(sub.raw_json, '$.grading_period_id') AS INTEGER) = target_gp.grading_period_id
+            )
       )
   )
   AND COALESCE(trim(sub.submitted_at), '') = ''

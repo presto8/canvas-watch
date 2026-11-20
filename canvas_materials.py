@@ -18,6 +18,7 @@ from urllib.parse import urljoin, urlparse
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
+from canvas_periods import assignment_matches_period, parse_period_selector, select_grading_periods
 from canvas_scraper import login_if_needed
 
 FILE_ID_PATTERN = re.compile(r"/files/(\d+)(?:/|$)")
@@ -45,6 +46,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--student", help="Limit to a student whose name contains this text")
     parser.add_argument("--course", help="Limit to a course whose name contains this text")
     parser.add_argument("--all-periods", action="store_true", help="Include assignments from all stored periods")
+    periods = parser.add_mutually_exclusive_group()
+    periods.add_argument("--quarter", metavar="YYYY-QN", help="Select a school-year quarter, e.g. 2020-Q1")
+    periods.add_argument("--semester", metavar="YYYY-SN", help="Select two quarters, e.g. 2020-S1")
     parser.add_argument("--dry-run", action="store_true", help="List file references without downloading")
     parser.add_argument("--refresh", action="store_true", help="Re-download files already present locally")
     parser.add_argument("--limit", type=int, default=500, help="Maximum unique files to process (default: 500)")
@@ -81,32 +85,8 @@ def canvas_file_ids(assignment: dict, origin: str) -> set[int]:
     return found
 
 
-def current_period_matches(row: sqlite3.Row, assignment: dict, submission: dict, all_periods: bool) -> bool:
-    if all_periods:
-        return True
-    period_id = row["current_period_id"]
-    if period_id is None:
-        return False
-    if assignment.get("grading_period_id") == period_id:
-        return True
-    if submission.get("grading_period_id") == period_id:
-        return True
-    due_at = assignment.get("due_at")
-    if due_at and row["period_start"] and row["period_end"]:
-        from datetime import datetime
-
-        try:
-            due = datetime.fromisoformat(due_at.replace("Z", "+00:00"))
-            start = datetime.fromisoformat(row["period_start"].replace("Z", "+00:00"))
-            end = datetime.fromisoformat(row["period_end"].replace("Z", "+00:00"))
-            return start <= due <= end
-        except (TypeError, ValueError):
-            return False
-    return False
-
-
 def find_assignment_files(db_path: Path, origin: str, student_filter: str | None,
-                          course_filter: str | None, all_periods: bool) -> dict[int, list[dict]]:
+                          course_filter: str | None, all_periods: bool, period_selector: dict) -> dict[int, list[dict]]:
     connection = sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     try:
@@ -117,8 +97,12 @@ def find_assignment_files(db_path: Path, origin: str, student_filter: str | None
             )
             SELECT s.name AS student, cs.course_id, COALESCE(c.name, 'Course ' || cs.course_id) AS course,
                    cs.scrape_run_id, a.assignment_id, a.name AS assignment, a.raw_json AS assignment_json,
-                   e.raw_json AS enrollment_json, gp.grading_period_id AS current_period_id,
-                   gp.start_at AS period_start, gp.end_at AS period_end,
+                   cs.raw_course_json AS course_json, e.raw_json AS enrollment_json,
+            (SELECT json_group_array(json_object('id', p.grading_period_id, 'title', p.title,
+                              'start_at', p.start_at, 'end_at', p.end_at))
+                    FROM grading_periods AS p
+                    WHERE p.scrape_run_id=cs.scrape_run_id AND p.student_id=cs.student_id
+                      AND p.course_id=cs.course_id) AS periods_json,
                    sub.raw_json AS submission_json
             FROM latest l
             JOIN course_scrapes cs
@@ -127,9 +111,6 @@ def find_assignment_files(db_path: Path, origin: str, student_filter: str | None
             LEFT JOIN courses c ON c.id=cs.course_id
             JOIN enrollments e
               ON e.scrape_run_id=cs.scrape_run_id AND e.student_id=cs.student_id AND e.course_id=cs.course_id
-            LEFT JOIN grading_periods gp
-              ON gp.scrape_run_id=e.scrape_run_id AND gp.student_id=e.student_id AND gp.course_id=e.course_id
-             AND gp.grading_period_id=CAST(json_extract(e.raw_json, '$.current_grading_period_id') AS INTEGER)
             JOIN assignments a
               ON a.scrape_run_id=cs.scrape_run_id AND a.student_id=cs.student_id AND a.course_id=cs.course_id
             LEFT JOIN submissions sub
@@ -148,7 +129,13 @@ def find_assignment_files(db_path: Path, origin: str, student_filter: str | None
     for row in rows:
         assignment = json.loads(row["assignment_json"] or "{}")
         submission = json.loads(row["submission_json"] or "{}")
-        if not current_period_matches(row, assignment, submission, all_periods):
+        enrollment = json.loads(row["enrollment_json"] or "{}")
+        course_data = json.loads(row["course_json"] or "{}")
+        periods = select_grading_periods(
+            json.loads(row["periods_json"] or "[]"), course_data,
+            enrollment.get("current_grading_period_id"), period_selector,
+        )
+        if not all_periods and not assignment_matches_period(assignment, submission, periods):
             continue
         for file_id in canvas_file_ids(assignment, origin):
             references.setdefault(file_id, []).append({
@@ -282,6 +269,14 @@ def download_files(references: dict[int, list[dict]], origin: str, output_root: 
 def main() -> int:
     load_dotenv()
     args = parse_args()
+    try:
+        period_selector = parse_period_selector(args.quarter, args.semester)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    if args.all_periods and period_selector["academic_year"] is not None:
+        print("Use either --all-periods or --quarter/--semester, not both.", file=sys.stderr)
+        return 2
     if not 1 <= args.limit <= 5000:
         print("--limit must be between 1 and 5000.", file=sys.stderr)
         return 2
@@ -300,7 +295,8 @@ def main() -> int:
     origin = f"{parsed_url.scheme}://{parsed_url.netloc}"
 
     try:
-        references = find_assignment_files(args.db, origin, args.student, args.course, args.all_periods)
+        references = find_assignment_files(args.db, origin, args.student, args.course,
+                                           args.all_periods, period_selector)
     except sqlite3.Error as exc:
         print(f"Could not find assignment files: {exc}", file=sys.stderr)
         return 1
@@ -311,7 +307,14 @@ def main() -> int:
         print("No Canvas-hosted files linked from matching assignments were found.")
         return 0
     reference_count = sum(len(items) for items in references.values())
-    scope = "all stored periods" if args.all_periods else "current quarter"
+    if args.all_periods:
+        scope = "all stored periods"
+    elif period_selector["academic_year"] is None:
+        scope = "current quarter"
+    elif period_selector["quarter_number"] is not None:
+        scope = f"{period_selector['academic_year']}-Q{period_selector['quarter_number']}"
+    else:
+        scope = f"{period_selector['academic_year']}-S{period_selector['semester_number']}"
     print(f"Found {len(references)} unique Canvas file(s) across {reference_count} assignment link(s) ({scope}).")
     if args.dry_run:
         print("Dry run: no files downloaded. Use `canvas materials` to download them.")

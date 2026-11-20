@@ -21,19 +21,20 @@ Commands:
   scrape [URL]         Scrape one Canvas page into JSON
   list [students|classes]
                        Show observed students and/or their current classes
-  show --student NAME --course NAME [--all-periods] [--with-comments]
-                       Show assignments and grades for a course (current quarter by default)
-  comments [--student NAME] [--course NAME] [--all-periods]
+  show --student NAME --course NAME [--quarter YYYY-QN | --semester YYYY-SN | --all-periods]
+                       Show assignments and grades for a selected school period
+  comments [--student NAME] [--course NAME] [--quarter YYYY-QN | --semester YYYY-SN | --all-periods]
                        Show non-student comments on assignments
-  missing [--student NAME] [--all-periods]
-                       Find unsubmitted assignments in the current quarter
-  alerts [--student NAME] [--threshold PCT] [--all-periods]
+  missing [--student NAME] [--quarter YYYY-QN | --semester YYYY-SN | --all-periods]
+                       Find unsubmitted assignments in the selected/current period
+  alerts [--student NAME] [--threshold PCT] [--quarter YYYY-QN | --semester YYYY-SN | --all-periods]
                        Find assignments below 90% or marked missing
-  upcoming [--days N] [--student NAME] [--all-periods]
-                       Show upcoming deadlines (next 7 days by default)
+  upcoming [--days N] [--student NAME] [--quarter YYYY-QN | --semester YYYY-SN | --all-periods]
+                       Show upcoming deadlines (next 7 days, within selected period)
   history [--limit N] [--student NAME]
                        Show recent sync runs and grade/submission changes
-  materials [options]   Download assignment-linked Canvas files
+  materials [--quarter YYYY-QN | --semester YYYY-SN | --all-periods]
+                       Download assignment-linked Canvas files
   attachments [options] Alias for materials
   students             Alias for 'list students'
   classes              Alias for 'list classes'

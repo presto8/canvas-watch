@@ -7,10 +7,27 @@ from pathlib import Path
 
 from canvas_query import show_alerts, show_assignments, show_history, show_not_submitted, show_upcoming, teacher_comments
 from canvas_materials import canvas_file_ids
+from canvas_periods import parse_period_selector, select_grading_periods
 from canvas_scraper import store_observed_data
 
 
 class AssignmentQueryTests(unittest.TestCase):
+    def test_quarter_and_semester_selectors_use_school_year_and_period_title(self):
+        course = {"term": {"name": "2020/2021 - Test School - Year"}}
+        periods = [
+            {"id": 1, "title": "Q1"},
+            {"id": 2, "title": "Q2"},
+            {"id": 3, "title": "Q3"},
+            {"id": 4, "title": "Q4"},
+        ]
+        q1 = select_grading_periods(periods, course, None, parse_period_selector("2020-Q1", None))
+        semester1 = select_grading_periods(periods, course, None, parse_period_selector(None, "2020-S1"))
+        semester2 = select_grading_periods(periods, course, None, parse_period_selector(None, "2020-S2"))
+        self.assertEqual([period["id"] for period in q1], [1])
+        self.assertEqual([period["id"] for period in semester1], [1, 2])
+        self.assertEqual([period["id"] for period in semester2], [3, 4])
+        self.assertEqual(select_grading_periods(periods, course, None, parse_period_selector("2019-Q1", None)), [])
+
     def test_teacher_comments_excludes_student_authored_replies(self):
         comments = teacher_comments({
             "user_id": 7,
@@ -45,7 +62,7 @@ class AssignmentQueryTests(unittest.TestCase):
                         "course": {
                             "id": 11,
                             "name": "Test Course",
-                            "term": {"name": "Test Term"},
+                            "term": {"name": "2020/2021 - Test Term"},
                             "enrollments": [{
                                 "role": "ObserverEnrollment",
                                 "enrollment_state": "active",
@@ -55,22 +72,22 @@ class AssignmentQueryTests(unittest.TestCase):
                         "data_status": "available",
                         "grading_periods": [{
                             "id": 5,
-                            "title": "Quarter 2",
-                            "start_date": "2026-01-01T00:00:00Z",
-                            "end_date": "2026-01-31T23:59:59Z",
+                            "title": "Q1",
+                            "start_date": "2020-08-01T00:00:00Z",
+                            "end_date": "2020-10-31T23:59:59Z",
                         }],
                         "assignments": [{
                             "id": 101,
                             "name": "Unit Quiz",
                             "points_possible": 10,
-                            "due_at": "2026-01-10T00:00:00Z",
+                            "due_at": "2020-10-10T00:00:00Z",
                         }],
                         "submissions": [{
                             "id": 201,
                             "assignment_id": 101,
                             "score": 9,
                             "grade": "9",
-                            "graded_at": "2026-01-09T00:00:00Z",
+                            "graded_at": "2020-10-09T00:00:00Z",
                             "raw_json": "{}",
                         }],
                     }],
@@ -79,7 +96,10 @@ class AssignmentQueryTests(unittest.TestCase):
 
             output = io.StringIO()
             with redirect_stdout(output):
-                result = show_assignments(database, "Test Student", "Test Course")
+                result = show_assignments(
+                    database, "Test Student", "Test Course",
+                    period_selector=parse_period_selector("2020-Q1", None),
+                )
 
             self.assertEqual(result, 0)
             self.assertIn("Test Student — Test Course", output.getvalue())
@@ -101,8 +121,9 @@ class AssignmentQueryTests(unittest.TestCase):
                             "id": 11,
                             "name": "Test Course",
                             "term": {
-                                "start_at": "2020-01-01T00:00:00Z",
-                                "end_at": "2099-12-31T23:59:59Z",
+                                "name": "2020/2021 - Test Term",
+                                "start_at": "2020-08-01T00:00:00Z",
+                                "end_at": "2021-06-30T23:59:59Z",
                             },
                             "enrollments": [{
                                 "role": "ObserverEnrollment",
@@ -113,20 +134,20 @@ class AssignmentQueryTests(unittest.TestCase):
                         "data_status": "available",
                         "grading_periods": [{
                             "id": 7,
-                            "title": "Test Quarter",
-                            "start_date": "2020-01-01T00:00:00Z",
-                            "end_date": "2099-12-31T23:59:59Z",
+                            "title": "Q1",
+                            "start_date": "2020-08-01T00:00:00Z",
+                            "end_date": "2020-10-31T23:59:59Z",
                         }],
                         "assignments": [
-                            {"id": 101, "name": "Outstanding Work", "due_at": "2020-01-01T00:00:00Z"},
-                            {"id": 102, "name": "Already Graded", "due_at": "2020-01-01T00:00:00Z"},
+                            {"id": 101, "name": "Outstanding Work", "due_at": "2020-10-01T00:00:00Z"},
+                            {"id": 102, "name": "Already Graded", "due_at": "2020-10-01T00:00:00Z"},
                         ],
                         "submissions": [{
                             "id": 202,
                             "assignment_id": 102,
                             "score": 10,
                             "grade": "10",
-                            "graded_at": "2020-01-02T00:00:00Z",
+                            "graded_at": "2020-10-02T00:00:00Z",
                         }],
                     }],
                 }],
@@ -134,7 +155,9 @@ class AssignmentQueryTests(unittest.TestCase):
 
             output = io.StringIO()
             with redirect_stdout(output):
-                result = show_not_submitted(database)
+                result = show_not_submitted(
+                    database, period_selector=parse_period_selector("2020-Q1", None)
+                )
 
             self.assertEqual(result, 0)
             self.assertIn("Outstanding Work", output.getvalue())
@@ -153,6 +176,7 @@ class AssignmentQueryTests(unittest.TestCase):
                         "course": {
                             "id": 11,
                             "name": "Test Course",
+                            "term": {"name": "2020/2021 - Test Term"},
                             "enrollments": [{
                                 "role": "ObserverEnrollment",
                                 "enrollment_state": "active",
@@ -162,7 +186,7 @@ class AssignmentQueryTests(unittest.TestCase):
                         "data_status": "available",
                         "grading_periods": [{
                             "id": 7,
-                            "title": "Test Quarter",
+                            "title": "Quarter 1",
                             "start_date": "2020-01-01T00:00:00Z",
                             "end_date": "2099-12-31T23:59:59Z",
                         }],
@@ -181,7 +205,7 @@ class AssignmentQueryTests(unittest.TestCase):
 
             output = io.StringIO()
             with redirect_stdout(output):
-                result = show_alerts(database)
+                result = show_alerts(database, period_selector=parse_period_selector("2020-Q1", None))
 
             self.assertEqual(result, 0)
             self.assertIn("Low Score", output.getvalue())

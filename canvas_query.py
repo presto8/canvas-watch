@@ -14,6 +14,8 @@ from pathlib import Path
 import textwrap
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from canvas_periods import assignment_matches_period, parse_period_selector, select_grading_periods
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -24,6 +26,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--course", help="Course name or ID (required for assignments view)")
     parser.add_argument("--all-periods", "--all-classes", dest="all_periods", action="store_true",
                         help="Include assignments outside the current grading period in show/missing views")
+    period_group = parser.add_mutually_exclusive_group()
+    period_group.add_argument("--quarter", metavar="YYYY-QN", help="Select a school-year quarter, e.g. 2020-Q1")
+    period_group.add_argument("--semester", metavar="YYYY-SN", help="Select two quarters, e.g. 2020-S1")
     parser.add_argument("--threshold", type=float, default=90.0, help="Low-grade percentage threshold (default: 90)")
     parser.add_argument("--days", type=int, default=7, help="Upcoming deadline window in days (default: 7)")
     parser.add_argument("--include-submitted", action="store_true", help="Include assignments already submitted or graded")
@@ -46,23 +51,15 @@ def term_dates(term: dict) -> tuple[date | None, date | None]:
     return parse(term.get("start_at")), parse(term.get("end_at"))
 
 
-def assignment_in_period(row: sqlite3.Row, assignment: dict, submission: dict, all_periods: bool) -> bool:
+def period_scope(selector: dict, all_periods: bool) -> str:
     if all_periods:
-        return True
-    period_id = row["current_period_id"]
-    if period_id is None:
-        return False
-    if assignment.get("grading_period_id") == period_id or submission.get("grading_period_id") == period_id:
-        return True
-    if not assignment.get("due_at") or not row["period_start"] or not row["period_end"]:
-        return False
-    try:
-        due = datetime.fromisoformat(assignment["due_at"].replace("Z", "+00:00"))
-        start = datetime.fromisoformat(row["period_start"].replace("Z", "+00:00"))
-        end = datetime.fromisoformat(row["period_end"].replace("Z", "+00:00"))
-        return start <= due <= end
-    except (TypeError, ValueError):
-        return False
+        return "all stored periods"
+    year = selector.get("academic_year")
+    if year is None:
+        return "current quarter"
+    if selector.get("quarter_number") is not None:
+        return f"{year}-Q{selector['quarter_number']}"
+    return f"{year}-S{selector['semester_number']}"
 
 
 def teacher_comments(submission: dict, student_id: int) -> list[dict]:
@@ -88,7 +85,8 @@ def teacher_comments(submission: dict, student_id: int) -> list[dict]:
 
 
 def show_assignments(db_path: Path, student_query: str, course_query: str,
-                     all_periods: bool = False, include_comments: bool = False) -> int:
+                     all_periods: bool = False, include_comments: bool = False,
+                     period_selector: dict | None = None) -> int:
     connection = sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     try:
@@ -138,31 +136,36 @@ def show_assignments(db_path: Path, student_query: str, course_query: str,
             term = metadata.get("term") or {}
             term_label = f" — {term['name']}" if term.get("name") else ""
             course_name = course["course_name"] or f"Course {course_id}"
-            period = connection.execute("""
-                SELECT gp.title, gp.start_at, gp.end_at
-                FROM enrollments AS e
-                JOIN grading_periods AS gp
-                  ON gp.scrape_run_id=e.scrape_run_id
-                 AND gp.student_id=e.student_id
-                 AND gp.course_id=e.course_id
-                 AND gp.grading_period_id=CAST(json_extract(e.raw_json, '$.current_grading_period_id') AS INTEGER)
-                WHERE e.scrape_run_id=? AND e.student_id=? AND e.course_id=?
-                  AND e.enrollment_state='active'
+            enrollment = connection.execute("""
+                SELECT raw_json FROM enrollments
+                WHERE scrape_run_id=? AND student_id=? AND course_id=? AND enrollment_state='active'
                 LIMIT 1
             """, (run_id, student["id"], course_id)).fetchone()
+            enrollment_data = json.loads(enrollment["raw_json"] or "{}") if enrollment else {}
+            period_rows = connection.execute("""
+                SELECT grading_period_id AS id, title, start_at, end_at FROM grading_periods
+                WHERE scrape_run_id=? AND student_id=? AND course_id=?
+            """, (run_id, student["id"], course_id)).fetchall()
+            selector = period_selector or parse_period_selector(None, None)
+            periods = select_grading_periods(
+                period_rows, metadata, enrollment_data.get("current_grading_period_id"), selector
+            )
             period_label = ""
-            if period:
-                period_label = f" — {period['title']} ({(period['start_at'] or '')[:10]} to {(period['end_at'] or '')[:10]})"
+            if all_periods:
+                period_label = " — all stored periods"
+            elif periods:
+                label = ", ".join(period["title"] for period in periods)
+                period_label = f" — {label} ({(periods[0]['start_at'] or '')[:10]} to {(periods[-1]['end_at'] or '')[:10]})"
             print(f"\n{student['name']} — {course_name}{term_label}{period_label}")
             if course["data_status"] == "partial":
                 print("  Note: Canvas provided partial data for this course.")
 
-            if not all_periods and not period:
-                print("  Current grading period is unavailable. Run `canvas sync` to refresh, or use `--all-periods`.")
+            if not all_periods and not periods:
+                print("  Requested Canvas grading period is unavailable. Run `canvas sync` to refresh or select another period.")
                 continue
 
             assignment_sql = """
-                SELECT a.assignment_id, a.name, a.points_possible, a.due_at,
+                SELECT a.assignment_id, a.name, a.points_possible, a.due_at, a.raw_json AS assignment_json,
                        sub.score, sub.grade, sub.submitted_at, sub.graded_at,
                        sub.raw_json AS submission_json
                 FROM assignments AS a
@@ -174,11 +177,17 @@ def show_assignments(db_path: Path, student_query: str, course_query: str,
                 WHERE a.scrape_run_id = ? AND a.student_id = ? AND a.course_id = ?
             """
             params = [run_id, student["id"], course_id]
-            if not all_periods:
-                assignment_sql += " AND datetime(a.due_at) BETWEEN datetime(?) AND datetime(?)"
-                params.extend((period["start_at"], period["end_at"]))
             assignment_sql += " ORDER BY CASE WHEN a.due_at IS NULL THEN 1 ELSE 0 END, a.due_at, a.name"
             rows = connection.execute(assignment_sql, params).fetchall()
+            if not all_periods:
+                rows = [
+                    row for row in rows
+                    if assignment_matches_period(
+                        json.loads(row["assignment_json"] or "{}"),
+                        json.loads(row["submission_json"] or "{}"),
+                        periods,
+                    )
+                ]
             if not rows:
                 print("  No assignment records were stored for this course.")
                 continue
@@ -230,7 +239,7 @@ def show_assignments(db_path: Path, student_query: str, course_query: str,
 
 
 def show_comments(db_path: Path, student_filter: str | None = None, course_filter: str | None = None,
-                  all_periods: bool = False) -> int:
+                  all_periods: bool = False, period_selector: dict | None = None) -> int:
     try:
         connection = sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True)
         connection.row_factory = sqlite3.Row
@@ -247,8 +256,13 @@ def show_comments(db_path: Path, student_filter: str | None = None, course_filte
             SELECT s.id AS student_id, s.name AS student, cs.course_id,
                    COALESCE(c.name, 'Course ' || cs.course_id) AS course,
                    a.assignment_id, a.name AS assignment, a.raw_json AS assignment_json,
-                   gp.grading_period_id AS current_period_id, gp.start_at AS period_start,
-                   gp.end_at AS period_end, sub.raw_json AS submission_json
+                   cs.raw_course_json AS course_json, e.raw_json AS enrollment_json,
+            (SELECT json_group_array(json_object('id', p.grading_period_id, 'title', p.title,
+                              'start_at', p.start_at, 'end_at', p.end_at))
+                    FROM grading_periods AS p
+                    WHERE p.scrape_run_id=cs.scrape_run_id AND p.student_id=cs.student_id
+                      AND p.course_id=cs.course_id) AS periods_json,
+                   sub.raw_json AS submission_json
             FROM latest l
             JOIN course_scrapes cs
               ON cs.student_id=l.student_id AND cs.course_id=l.course_id AND cs.scrape_run_id=l.run_id
@@ -256,9 +270,6 @@ def show_comments(db_path: Path, student_filter: str | None = None, course_filte
             LEFT JOIN courses c ON c.id=cs.course_id
             JOIN enrollments e
               ON e.scrape_run_id=cs.scrape_run_id AND e.student_id=cs.student_id AND e.course_id=cs.course_id
-            LEFT JOIN grading_periods gp
-              ON gp.scrape_run_id=e.scrape_run_id AND gp.student_id=e.student_id AND gp.course_id=e.course_id
-             AND gp.grading_period_id=CAST(json_extract(e.raw_json, '$.current_grading_period_id') AS INTEGER)
             JOIN assignments a
               ON a.scrape_run_id=cs.scrape_run_id AND a.student_id=cs.student_id AND a.course_id=cs.course_id
             JOIN submissions sub
@@ -276,15 +287,22 @@ def show_comments(db_path: Path, student_filter: str | None = None, course_filte
         connection.close()
 
     comments = []
+    selector = period_selector or parse_period_selector(None, None)
     for row in rows:
         assignment = json.loads(row["assignment_json"] or "{}")
         submission = json.loads(row["submission_json"] or "{}")
-        if not assignment_in_period(row, assignment, submission, all_periods):
+        enrollment = json.loads(row["enrollment_json"] or "{}")
+        course_data = json.loads(row["course_json"] or "{}")
+        periods = select_grading_periods(
+            json.loads(row["periods_json"] or "[]"), course_data,
+            enrollment.get("current_grading_period_id"), selector,
+        )
+        if not all_periods and not assignment_matches_period(assignment, submission, periods):
             continue
         for comment in teacher_comments(submission, row["student_id"]):
             comments.append((row, comment))
 
-    scope = "all stored periods" if all_periods else "current quarter"
+    scope = period_scope(selector, all_periods)
     if not comments:
         print(f"No non-student assignment comments found in the {scope}.")
         return 0
@@ -300,7 +318,8 @@ def show_comments(db_path: Path, student_filter: str | None = None, course_filte
     return 0
 
 
-def show_not_submitted(db_path: Path, student_filter: str | None = None, all_periods: bool = False) -> int:
+def show_not_submitted(db_path: Path, student_filter: str | None = None, all_periods: bool = False,
+                       period_selector: dict | None = None) -> int:
     query_path = Path(__file__).parent / "queries" / "not_submitted.sql"
     try:
         sql = query_path.read_text(encoding="utf-8")
@@ -311,7 +330,8 @@ def show_not_submitted(db_path: Path, student_filter: str | None = None, all_per
         return 1
 
     try:
-        params = {"student": student_filter, "all_periods": int(all_periods)}
+        selector = period_selector or parse_period_selector(None, None)
+        params = {"student": student_filter, "all_periods": int(all_periods), **selector}
         rows = connection.execute(sql, params).fetchall()
         partial_query = """
             WITH latest_course_runs AS (
@@ -343,10 +363,10 @@ def show_not_submitted(db_path: Path, student_filter: str | None = None, all_per
         connection.close()
 
     if not rows:
-        scope = "all stored periods" if all_periods else "current-quarter assignments"
+        scope = period_scope(selector, all_periods)
         print(f"No not-submitted assignments found in {scope}.")
     else:
-        scope = "all stored periods" if all_periods else "current-quarter assignments"
+        scope = period_scope(selector, all_periods)
         print(f"Not-submitted assignments in {scope}: {len(rows)}")
         print(f"{'STUDENT':24} {'COURSE':36} {'ASSIGNMENT':42} {'DUE':12} STATUS")
         print(f"{'-' * 24} {'-' * 36} {'-' * 42} {'-' * 12} {'-' * 14}")
@@ -372,6 +392,7 @@ def show_alerts(
     student_filter: str | None = None,
     threshold: float = 90.0,
     all_periods: bool = False,
+    period_selector: dict | None = None,
 ) -> int:
     if not 0 <= threshold <= 100:
         print("--threshold must be between 0 and 100.", file=sys.stderr)
@@ -386,10 +407,12 @@ def show_alerts(
         return 1
 
     try:
+        selector = period_selector or parse_period_selector(None, None)
         rows = connection.execute(sql, {
             "student": student_filter,
             "threshold": threshold,
             "all_periods": int(all_periods),
+            **selector,
         }).fetchall()
     except sqlite3.Error as exc:
         print(f"Could not query low-grade/missing assignments: {exc}", file=sys.stderr)
@@ -397,7 +420,7 @@ def show_alerts(
     finally:
         connection.close()
 
-    scope = "all stored periods" if all_periods else "current quarter"
+    scope = period_scope(selector, all_periods)
     if not rows:
         print(f"No assignments below {threshold:g}% or missing in the {scope}.")
         return 0
@@ -432,6 +455,7 @@ def show_upcoming(
     days: int = 7,
     all_periods: bool = False,
     include_submitted: bool = False,
+    period_selector: dict | None = None,
 ) -> int:
     if not 1 <= days <= 365:
         print("--days must be between 1 and 365.", file=sys.stderr)
@@ -446,11 +470,13 @@ def show_upcoming(
         return 1
 
     try:
+        selector = period_selector or parse_period_selector(None, None)
         rows = connection.execute(sql, {
             "student": student_filter,
             "days": days,
             "all_periods": int(all_periods),
             "include_submitted": int(include_submitted),
+            **selector,
         }).fetchall()
     except sqlite3.Error as exc:
         print(f"Could not query upcoming deadlines: {exc}", file=sys.stderr)
@@ -458,7 +484,7 @@ def show_upcoming(
     finally:
         connection.close()
 
-    scope = "all stored periods" if all_periods else "current quarter"
+    scope = period_scope(selector, all_periods)
     submission_scope = "all assignments" if include_submitted else "not-yet-submitted assignments"
     if not rows:
         print(f"No {submission_scope} due in the next {days} days in the {scope}.")
@@ -654,6 +680,18 @@ def show_history(db_path: Path, student_filter: str | None = None, limit: int = 
 
 def main() -> int:
     args = parse_args()
+    try:
+        selector = parse_period_selector(args.quarter, args.semester)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    if args.all_periods and selector["academic_year"] is not None:
+        print("Use either --all-periods or --quarter/--semester, not both.", file=sys.stderr)
+        return 2
+    period_views = {"assignments", "comments", "not-submitted", "alerts", "upcoming"}
+    if (args.all_periods or selector["academic_year"] is not None) and args.view not in period_views:
+        print("Period selectors apply to assignment, comment, alert, and deadline views.", file=sys.stderr)
+        return 2
     if not args.db.is_file():
         print(f"Database not found: {args.db}. Run canvas_scraper.py first.", file=sys.stderr)
         return 2
@@ -663,18 +701,20 @@ def main() -> int:
             print("The assignments view requires both --student and --course.", file=sys.stderr)
             return 2
         try:
-            return show_assignments(args.db, args.student, args.course, args.all_periods, args.with_comments)
+            return show_assignments(args.db, args.student, args.course, args.all_periods,
+                                    args.with_comments, selector)
         except sqlite3.Error as exc:
             print(f"Could not open database: {exc}", file=sys.stderr)
             return 1
     if args.view == "not-submitted":
-        return show_not_submitted(args.db, args.student, args.all_periods)
+        return show_not_submitted(args.db, args.student, args.all_periods, selector)
     if args.view == "comments":
-        return show_comments(args.db, args.student, args.course, args.all_periods)
+        return show_comments(args.db, args.student, args.course, args.all_periods, selector)
     if args.view == "alerts":
-        return show_alerts(args.db, args.student, args.threshold, args.all_periods)
+        return show_alerts(args.db, args.student, args.threshold, args.all_periods, selector)
     if args.view == "upcoming":
-        return show_upcoming(args.db, args.student, args.days, args.all_periods, args.include_submitted)
+        return show_upcoming(args.db, args.student, args.days, args.all_periods,
+                             args.include_submitted, selector)
     if args.view == "history":
         return show_history(args.db, args.student, args.limit)
 

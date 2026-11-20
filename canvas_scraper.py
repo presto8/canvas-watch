@@ -158,10 +158,10 @@ def scrape_observed_students(page, student_queries: list[str] | None) -> dict:
               const key = `${person.id}:${course.id}`;
               const query = `student_ids[]=${person.id}&include[]=assignment&per_page=100`;
               const commentsQuery = `${query}&include[]=submission_comments&include[]=rubric_assessment`;
-              const hasCurrentPeriod = (course.enrollments || []).some(
+              const hasGradingPeriods = course.has_grading_periods === true || (course.enrollments || []).some(
                 (enrollment) => enrollment.current_grading_period_id != null
               );
-              const gradingPeriodsRequest = hasCurrentPeriod
+              const gradingPeriodsRequest = hasGradingPeriods
                 ? (async () => {
                     const response = await fetch(
                       `/api/v1/courses/${course.id}/grading_periods?per_page=100`,

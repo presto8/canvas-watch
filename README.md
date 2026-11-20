@@ -71,16 +71,26 @@ Show assignments, scores, due dates, and submission status for a student in a
 class. By default, this is limited to the current Canvas grading period (usually
 the quarter). The course name can be a partial match:
 
+Use the school-year start year for explicit periods: `2020-Q1` means Quarter 1
+of the 2020–2021 school year. `2020-S1` means Q1+Q2, and `2020-S2` means Q3+Q4.
+Selectors use Canvas grading-period dates and course-term metadata.
+`--quarter` and `--semester` are mutually exclusive with each other and with
+`--all-periods`. If Canvas has no matching grading-period record for a course,
+that course is omitted rather than guessed.
+
 ```bash
 canvas show --student '<student name>' --course '<course name>'
 canvas show --student '<student name>' --course '<course name>' --all-periods
+canvas show --student '<student name>' --course '<course name>' --quarter 2020-Q1
+canvas show --student '<student name>' --course '<course name>' --semester 2020-S1
 canvas show --student '<student name>' --course '<course name>' --with-comments
 canvas comments --student '<student name>' --course '<course name>'
 ```
 
 `canvas comments` displays non-student-authored assignment comments, with the
-author and date. It defaults to the current quarter; add `--all-periods` to
-include older comments. The scraper stores these comments during `canvas sync`.
+author and date. It defaults to the current quarter; use `--quarter` or
+`--semester` to select another one. The scraper stores these comments during
+`canvas sync`.
 
 Find assignments with no submission, score, grade, or grading timestamp across
 all students' current quarters:
@@ -88,6 +98,8 @@ all students' current quarters:
 ```bash
 canvas missing
 canvas missing --student '<student name>'
+canvas missing --quarter 2020-Q1
+canvas missing --semester 2020-S1
 ```
 
 Add `--all-periods` to include assignments from past and undated periods. The reusable SQLite
@@ -102,6 +114,7 @@ canvas alerts
 canvas alerts --student '<student name>'
 canvas alerts --threshold 85
 canvas alerts --all-periods
+canvas alerts --quarter 2020-Q1
 ```
 
 The SQL is in `queries/below_threshold_or_missing.sql`. Percentages use Canvas
@@ -115,6 +128,7 @@ canvas upcoming
 canvas upcoming --days 14
 canvas upcoming --student '<student name>'
 canvas upcoming --include-submitted
+canvas upcoming --quarter 2020-Q1
 ```
 
 Use `--all-periods` to look beyond the current quarter. The query is in
@@ -136,6 +150,7 @@ canvas materials --dry-run
 canvas materials
 canvas attachments --student '<student name>'
 canvas materials --all-periods
+canvas materials --semester 2020-S1 --dry-run
 ```
 
 Files and a manifest are stored under the Git-ignored `data/materials/`
