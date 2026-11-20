@@ -21,6 +21,8 @@ Commands:
   scrape [URL]         Scrape one Canvas page into JSON
   list [students|classes]
                        Show observed students and/or their current classes
+  student set --student NAME --graduation-year YYYY
+                       Save a student's expected graduation year locally
   show --student NAME --course NAME [--quarter YYYY-QN | --semester YYYY-SN | --all-periods]
                        Show assignments and grades for a selected school period
   comments [--student NAME] [--course NAME] [--quarter YYYY-QN | --semester YYYY-SN | --all-periods]
@@ -33,6 +35,8 @@ Commands:
                        Show upcoming deadlines (next 7 days, within selected period)
   history [--limit N] [--student NAME]
                        Show recent sync runs and grade/submission changes
+  student set --student NAME --graduation-year YYYY
+                       Save a student's expected graduation year locally
   materials [--quarter YYYY-QN | --semester YYYY-SN | --all-periods]
                        Download assignment-linked Canvas files
   attachments [options] Alias for materials
@@ -82,6 +86,12 @@ def main() -> None:
     elif command == "students":
         target = ROOT / "canvas_query.py"
         command_args = ["students", *args]
+    elif command == "student":
+        if not args or args[0] != "set":
+            print("Usage: canvas student set --student NAME --graduation-year YYYY", file=sys.stderr)
+            raise SystemExit(2)
+        target = ROOT / "canvas_query.py"
+        command_args = ["student-set", *args[1:]]
     elif command == "classes":
         target = ROOT / "canvas_query.py"
         command_args = ["classes", *args]

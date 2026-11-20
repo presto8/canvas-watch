@@ -1,17 +1,44 @@
 import io
 import tempfile
+import sqlite3
 import unittest
 from contextlib import redirect_stdout
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from canvas_query import show_alerts, show_assignments, show_history, show_not_submitted, show_upcoming, teacher_comments
+from canvas_query import (
+    estimate_grade_level,
+    set_student_graduation_year,
+    show_alerts,
+    show_assignments,
+    show_history,
+    show_not_submitted,
+    show_upcoming,
+    student_label,
+    teacher_comments,
+)
 from canvas_materials import canvas_file_ids
 from canvas_periods import parse_period_selector, select_grading_periods
 from canvas_scraper import store_observed_data
 
 
 class AssignmentQueryTests(unittest.TestCase):
+    def test_graduation_year_sets_manual_value_and_estimates_grade(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "canvas.sqlite3"
+            with sqlite3.connect(database) as connection:
+                connection.execute("CREATE TABLE students (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
+                connection.execute("INSERT INTO students (id, name) VALUES (1, 'Test Student')")
+            output = io.StringIO()
+            with redirect_stdout(output):
+                result = set_student_graduation_year(database, "Test Student", 2029)
+            self.assertEqual(result, 0)
+            with sqlite3.connect(database) as connection:
+                graduation_year = connection.execute("SELECT graduation_year FROM students WHERE id=1").fetchone()[0]
+            self.assertEqual(graduation_year, 2029)
+            self.assertEqual(estimate_grade_level(2029, date(2026, 11, 20)), "10th grade")
+            self.assertIn("Class of 2029; estimated 10th grade", student_label("Test Student", graduation_year, date(2026, 11, 20)))
+
     def test_quarter_and_semester_selectors_use_school_year_and_period_title(self):
         course = {"term": {"name": "2020/2021 - Test School - Year"}}
         periods = [

@@ -42,6 +42,8 @@ class SQLiteStorageTests(unittest.TestCase):
             }
 
             first_run = store_observed_data(data, database)
+            with sqlite3.connect(database) as connection:
+                connection.execute("UPDATE students SET graduation_year=2029 WHERE id=7")
             data["scraped_at"] = "2026-01-02T00:00:00+00:00"
             data["students"][0]["courses"][0]["submissions"][0]["score"] = 9
             second_run = store_observed_data(data, database)
@@ -53,12 +55,14 @@ class SQLiteStorageTests(unittest.TestCase):
                 ).fetchall()
                 assignments = connection.execute("SELECT COUNT(*) FROM assignments").fetchone()[0]
                 enrollment_score = connection.execute("SELECT current_score FROM enrollments").fetchone()[0]
+                graduation_year = connection.execute("SELECT graduation_year FROM students WHERE id=7").fetchone()[0]
 
             self.assertEqual((first_run, second_run), (1, 2))
             self.assertEqual(runs, 2)
             self.assertEqual(submissions, [(1, 8.0), (2, 9.0)])
             self.assertEqual(assignments, 2)
             self.assertEqual(enrollment_score, 87.5)
+            self.assertEqual(graduation_year, 2029)
             self.assertEqual(database.stat().st_mode & 0o777, 0o600)
 
 

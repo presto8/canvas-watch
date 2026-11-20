@@ -267,6 +267,7 @@ def store_observed_data(data: dict, db_path: Path) -> int:
                 name TEXT,
                 short_name TEXT,
                 sortable_name TEXT,
+                graduation_year INTEGER,
                 raw_json TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -347,6 +348,9 @@ def store_observed_data(data: dict, db_path: Path) -> int:
             CREATE INDEX IF NOT EXISTS idx_submissions_student_assignment
                 ON submissions(student_id, assignment_id, scrape_run_id);
         """)
+        student_columns = {row[1] for row in connection.execute("PRAGMA table_info(students)")}
+        if "graduation_year" not in student_columns:
+            connection.execute("ALTER TABLE students ADD COLUMN graduation_year INTEGER")
         with connection:
             cursor = connection.execute(
                 "INSERT INTO scrape_runs (scraped_at, source) VALUES (?, ?)",

@@ -67,6 +67,18 @@ canvas list --as-of 2026-11-16
 Courses with active enrollments but no term dates are shown separately rather
 than assumed to be current.
 
+Save a student's expected graduation year locally, then see the year and an
+estimated grade level in `canvas list students`:
+
+```bash
+canvas student set --student '<student name>' --graduation-year 2029
+canvas list students
+```
+
+Graduation year is a manual annotation in SQLite and is preserved by syncs. The
+grade-level estimate assumes an August school-year start; it is only an estimate,
+not an official Canvas value.
+
 Show assignments, scores, due dates, and submission status for a student in a
 class. By default, this is limited to the current Canvas grading period (usually
 the quarter). The course name can be a partial match:

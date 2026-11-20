@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -19,10 +20,11 @@ from canvas_periods import assignment_matches_period, parse_period_selector, sel
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("view", nargs="?", choices=("all", "students", "classes", "assignments", "comments", "not-submitted", "alerts", "upcoming", "history"), default="all",
+    parser.add_argument("view", nargs="?", choices=("all", "students", "classes", "assignments", "comments", "not-submitted", "alerts", "upcoming", "history", "student-set"), default="all",
                         help="Show students, classes, grades, comments, alerts, deadlines, or recent history")
     parser.add_argument("--db", type=Path, default=Path("data/canvas.sqlite3"), help="SQLite database path")
     parser.add_argument("--student", help="Show only a student whose name contains this text")
+    parser.add_argument("--graduation-year", type=int, help="Graduation year to save for a student")
     parser.add_argument("--course", help="Course name or ID (required for assignments view)")
     parser.add_argument("--all-periods", "--all-classes", dest="all_periods", action="store_true",
                         help="Include assignments outside the current grading period in show/missing views")
@@ -49,6 +51,81 @@ def term_dates(term: dict) -> tuple[date | None, date | None]:
             return None
 
     return parse(term.get("start_at")), parse(term.get("end_at"))
+
+
+def estimate_grade_level(graduation_year: int | None, as_of: date | None = None) -> str | None:
+    if graduation_year is None:
+        return None
+    as_of = as_of or date.today()
+    school_year_start = as_of.year if as_of.month >= 8 else as_of.year - 1
+    grade_number = 13 - (graduation_year - school_year_start)
+    if grade_number == 0:
+        return "Kindergarten"
+    if grade_number < 0:
+        return "pre-K or earlier"
+    if grade_number > 12:
+        return "graduated"
+    suffix = "th" if 11 <= grade_number % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(grade_number % 10, "th")
+    return f"{grade_number}{suffix} grade"
+
+
+def student_label(name: str, graduation_year: int | None, as_of: date | None = None) -> str:
+    if graduation_year is None:
+        return name
+    estimated = estimate_grade_level(graduation_year, as_of)
+    return f"{name} — Class of {graduation_year}; estimated {estimated}"
+
+
+def ensure_graduation_year_column(db_path: Path) -> None:
+    with sqlite3.connect(db_path) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(students)")}
+        if "graduation_year" not in columns:
+            connection.execute("ALTER TABLE students ADD COLUMN graduation_year INTEGER")
+    os.chmod(db_path, 0o600)
+
+
+def set_student_graduation_year(db_path: Path, student_query: str, graduation_year: int) -> int:
+    if not 1900 <= graduation_year <= 2200:
+        print("Graduation year must be between 1900 and 2200.", file=sys.stderr)
+        return 2
+    try:
+        ensure_graduation_year_column(db_path)
+        connection = sqlite3.connect(db_path)
+    except (sqlite3.Error, OSError) as exc:
+        print(f"Could not open database: {exc}", file=sys.stderr)
+        return 1
+    try:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(students)")}
+        if "graduation_year" not in columns:
+            connection.execute("ALTER TABLE students ADD COLUMN graduation_year INTEGER")
+        matches = connection.execute(
+            "SELECT id, name FROM students WHERE lower(name) LIKE ? ORDER BY name",
+            (f"%{student_query.casefold()}%",),
+        ).fetchall()
+        if not matches:
+            print(f"No student matched {student_query!r} in the database.")
+            return 0
+        if len(matches) > 1:
+            print("Student name is ambiguous; use a more specific --student value:")
+            for _, name in matches:
+                print(f"  • {name}")
+            return 2
+        student_id, name = matches[0]
+        with connection:
+            connection.execute("UPDATE students SET graduation_year=? WHERE id=?", (graduation_year, student_id))
+        connection.close()
+        print(f"Set {name}'s graduation year to {graduation_year}.")
+        return 0
+    except sqlite3.Error as exc:
+        print(f"Could not save graduation year: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        try:
+            connection.close()
+            if db_path.exists():
+                db_path.chmod(0o600)
+        except (sqlite3.Error, OSError):
+            pass
 
 
 def period_scope(selector: dict, all_periods: bool) -> str:
@@ -688,6 +765,17 @@ def main() -> int:
     if args.all_periods and selector["academic_year"] is not None:
         print("Use either --all-periods or --quarter/--semester, not both.", file=sys.stderr)
         return 2
+    if args.view == "student-set":
+        if not args.student or args.graduation_year is None:
+            print("Set a student's year with: canvas student set --student NAME --graduation-year YYYY", file=sys.stderr)
+            return 2
+        if args.all_periods or selector["academic_year"] is not None:
+            print("Period selectors do not apply to student settings.", file=sys.stderr)
+            return 2
+        if not args.db.is_file():
+            print(f"Database not found: {args.db}. Run `canvas sync` first.", file=sys.stderr)
+            return 2
+        return set_student_graduation_year(args.db, args.student, args.graduation_year)
     period_views = {"assignments", "comments", "not-submitted", "alerts", "upcoming"}
     if (args.all_periods or selector["academic_year"] is not None) and args.view not in period_views:
         print("Period selectors apply to assignment, comment, alert, and deadline views.", file=sys.stderr)
@@ -719,6 +807,12 @@ def main() -> int:
         return show_history(args.db, args.student, args.limit)
 
     try:
+        ensure_graduation_year_column(args.db)
+    except (sqlite3.Error, OSError) as exc:
+        print(f"Could not update student schema: {exc}", file=sys.stderr)
+        return 1
+
+    try:
         connection = sqlite3.connect(f"file:{args.db.resolve()}?mode=ro", uri=True)
         connection.row_factory = sqlite3.Row
     except sqlite3.Error as exc:
@@ -727,7 +821,7 @@ def main() -> int:
 
     try:
         rows = connection.execute("""
-            SELECT s.id AS student_id, s.name AS student_name,
+            SELECT s.id AS student_id, s.name AS student_name, s.graduation_year,
                    cs.course_id, cs.raw_course_json, cs.data_status,
                    e.enrollment_state
             FROM course_scrapes AS cs
@@ -755,7 +849,9 @@ def main() -> int:
         name = row["student_name"] or f"Student {row['student_id']}"
         if filter_text and filter_text not in name.casefold():
             continue
-        student = students.setdefault(row["student_id"], {"name": name, "current": [], "undated": []})
+        student = students.setdefault(row["student_id"], {
+            "name": name, "graduation_year": row["graduation_year"], "current": [], "undated": []
+        })
         if row["enrollment_state"] != "active":
             continue
         try:
@@ -785,12 +881,13 @@ def main() -> int:
     if args.view == "students":
         print("Observed students")
         for student in students.values():
-            print(f"  • {student['name']} ({len(student['current'])} current classes)")
+            label = student_label(student["name"], student["graduation_year"], args.as_of)
+            print(f"  • {label} ({len(student['current'])} current classes)")
         return 0
 
     print(f"Students and current classes as of {args.as_of.isoformat()}")
     for student in students.values():
-        print(f"\n{student['name']}")
+        print(f"\n{student_label(student['name'], student['graduation_year'], args.as_of)}")
         if student["current"]:
             for course in sorted(student["current"], key=lambda item: item["name"].casefold()):
                 suffix = f" — {course['term']}" if course["term"] else ""
