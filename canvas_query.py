@@ -4,18 +4,21 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
+import re
 import sqlite3
 import sys
 from datetime import date, datetime
 from pathlib import Path
+import textwrap
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("view", nargs="?", choices=("all", "students", "classes", "assignments", "not-submitted", "alerts", "upcoming", "history"), default="all",
-                        help="Show students, classes, grades, alerts, upcoming deadlines, or recent history")
+    parser.add_argument("view", nargs="?", choices=("all", "students", "classes", "assignments", "comments", "not-submitted", "alerts", "upcoming", "history"), default="all",
+                        help="Show students, classes, grades, comments, alerts, deadlines, or recent history")
     parser.add_argument("--db", type=Path, default=Path("data/canvas.sqlite3"), help="SQLite database path")
     parser.add_argument("--student", help="Show only a student whose name contains this text")
     parser.add_argument("--course", help="Course name or ID (required for assignments view)")
@@ -25,6 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--days", type=int, default=7, help="Upcoming deadline window in days (default: 7)")
     parser.add_argument("--include-submitted", action="store_true", help="Include assignments already submitted or graded")
     parser.add_argument("--limit", type=int, default=10, help="Number of recent runs/changes to show (default: 10)")
+    parser.add_argument("--with-comments", action="store_true", help="Include non-student comments in an assignment view")
     parser.add_argument("--as-of", type=date.fromisoformat, default=date.today(), metavar="YYYY-MM-DD",
                         help="Date used to determine current terms (default: today)")
     return parser.parse_args()
@@ -42,7 +46,49 @@ def term_dates(term: dict) -> tuple[date | None, date | None]:
     return parse(term.get("start_at")), parse(term.get("end_at"))
 
 
-def show_assignments(db_path: Path, student_query: str, course_query: str, all_periods: bool = False) -> int:
+def assignment_in_period(row: sqlite3.Row, assignment: dict, submission: dict, all_periods: bool) -> bool:
+    if all_periods:
+        return True
+    period_id = row["current_period_id"]
+    if period_id is None:
+        return False
+    if assignment.get("grading_period_id") == period_id or submission.get("grading_period_id") == period_id:
+        return True
+    if not assignment.get("due_at") or not row["period_start"] or not row["period_end"]:
+        return False
+    try:
+        due = datetime.fromisoformat(assignment["due_at"].replace("Z", "+00:00"))
+        start = datetime.fromisoformat(row["period_start"].replace("Z", "+00:00"))
+        end = datetime.fromisoformat(row["period_end"].replace("Z", "+00:00"))
+        return start <= due <= end
+    except (TypeError, ValueError):
+        return False
+
+
+def teacher_comments(submission: dict, student_id: int) -> list[dict]:
+    """Return non-student-authored comments attached to a submission."""
+    result = []
+    student_author_id = submission.get("user_id", student_id)
+    for comment in submission.get("submission_comments") or []:
+        if not isinstance(comment, dict):
+            continue
+        author_id = comment.get("author_id")
+        if author_id is not None and str(author_id) == str(student_author_id):
+            continue
+        text = html.unescape(str(comment.get("comment") or "")).strip()
+        text = re.sub(r"<[^>]*>", "", text).strip()
+        if text:
+            result.append({
+                "author": comment.get("author_name") or "Author not identified",
+                "created_at": comment.get("created_at"),
+                "text": text,
+                "attachments": comment.get("attachments") or [],
+            })
+    return result
+
+
+def show_assignments(db_path: Path, student_query: str, course_query: str,
+                     all_periods: bool = False, include_comments: bool = False) -> int:
     connection = sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     try:
@@ -168,12 +214,90 @@ def show_assignments(db_path: Path, student_query: str, course_query: str, all_p
                 name = (assignment["name"] or f"Assignment {assignment['assignment_id']}")[:48]
                 due = (assignment["due_at"] or "")[:10] or "—"
                 print(f"  {name:48} {grade_label:16} {due:12} {status}")
+                if include_comments:
+                    for comment in teacher_comments(submission, student["id"]):
+                        comment_time = _format_history_time(comment["created_at"]) if comment["created_at"] else "date unknown"
+                        body = textwrap.fill(comment["text"], width=96, initial_indent="      ", subsequent_indent="      ")
+                        print(f"      {comment['author']} ({comment_time}):\n{body}")
+                        if comment["attachments"]:
+                            print(f"      [comment attachment(s): {len(comment['attachments'])}]")
         return 0
     except sqlite3.Error as exc:
         print(f"Could not query database: {exc}", file=sys.stderr)
         return 1
     finally:
         connection.close()
+
+
+def show_comments(db_path: Path, student_filter: str | None = None, course_filter: str | None = None,
+                  all_periods: bool = False) -> int:
+    try:
+        connection = sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+    except sqlite3.Error as exc:
+        print(f"Could not open database: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        rows = connection.execute("""
+            WITH latest AS (
+                SELECT student_id, course_id, MAX(scrape_run_id) AS run_id
+                FROM course_scrapes GROUP BY student_id, course_id
+            )
+            SELECT s.id AS student_id, s.name AS student, cs.course_id,
+                   COALESCE(c.name, 'Course ' || cs.course_id) AS course,
+                   a.assignment_id, a.name AS assignment, a.raw_json AS assignment_json,
+                   gp.grading_period_id AS current_period_id, gp.start_at AS period_start,
+                   gp.end_at AS period_end, sub.raw_json AS submission_json
+            FROM latest l
+            JOIN course_scrapes cs
+              ON cs.student_id=l.student_id AND cs.course_id=l.course_id AND cs.scrape_run_id=l.run_id
+            JOIN students s ON s.id=cs.student_id
+            LEFT JOIN courses c ON c.id=cs.course_id
+            JOIN enrollments e
+              ON e.scrape_run_id=cs.scrape_run_id AND e.student_id=cs.student_id AND e.course_id=cs.course_id
+            LEFT JOIN grading_periods gp
+              ON gp.scrape_run_id=e.scrape_run_id AND gp.student_id=e.student_id AND gp.course_id=e.course_id
+             AND gp.grading_period_id=CAST(json_extract(e.raw_json, '$.current_grading_period_id') AS INTEGER)
+            JOIN assignments a
+              ON a.scrape_run_id=cs.scrape_run_id AND a.student_id=cs.student_id AND a.course_id=cs.course_id
+            JOIN submissions sub
+              ON sub.scrape_run_id=a.scrape_run_id AND sub.student_id=a.student_id
+             AND sub.course_id=a.course_id AND sub.assignment_id=a.assignment_id
+            WHERE e.enrollment_state='active'
+              AND (:student IS NULL OR lower(s.name) LIKE '%' || lower(:student) || '%')
+              AND (:course IS NULL OR lower(c.name) LIKE '%' || lower(:course) || '%')
+            ORDER BY s.name, c.name, a.name
+        """, {"student": student_filter, "course": course_filter}).fetchall()
+    except sqlite3.Error as exc:
+        print(f"Could not query assignment comments: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        connection.close()
+
+    comments = []
+    for row in rows:
+        assignment = json.loads(row["assignment_json"] or "{}")
+        submission = json.loads(row["submission_json"] or "{}")
+        if not assignment_in_period(row, assignment, submission, all_periods):
+            continue
+        for comment in teacher_comments(submission, row["student_id"]):
+            comments.append((row, comment))
+
+    scope = "all stored periods" if all_periods else "current quarter"
+    if not comments:
+        print(f"No non-student assignment comments found in the {scope}.")
+        return 0
+    print(f"Assignment comments in the {scope}: {len(comments)}")
+    for row, comment in comments:
+        assignment_name = row["assignment"] or f"Assignment {row['assignment_id']}"
+        comment_time = _format_history_time(comment["created_at"]) if comment["created_at"] else "date unknown"
+        print(f"\n{row['student']} — {row['course']} — {assignment_name}")
+        print(f"  {comment['author']} · {comment_time}")
+        print(textwrap.fill(comment["text"], width=96, initial_indent="  ", subsequent_indent="  "))
+        if comment["attachments"]:
+            print(f"  [comment attachment(s): {len(comment['attachments'])}]")
+    return 0
 
 
 def show_not_submitted(db_path: Path, student_filter: str | None = None, all_periods: bool = False) -> int:
@@ -539,12 +663,14 @@ def main() -> int:
             print("The assignments view requires both --student and --course.", file=sys.stderr)
             return 2
         try:
-            return show_assignments(args.db, args.student, args.course)
+            return show_assignments(args.db, args.student, args.course, args.all_periods, args.with_comments)
         except sqlite3.Error as exc:
             print(f"Could not open database: {exc}", file=sys.stderr)
             return 1
     if args.view == "not-submitted":
         return show_not_submitted(args.db, args.student, args.all_periods)
+    if args.view == "comments":
+        return show_comments(args.db, args.student, args.course, args.all_periods)
     if args.view == "alerts":
         return show_alerts(args.db, args.student, args.threshold, args.all_periods)
     if args.view == "upcoming":

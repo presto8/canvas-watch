@@ -21,8 +21,10 @@ Commands:
   scrape [URL]         Scrape one Canvas page into JSON
   list [students|classes]
                        Show observed students and/or their current classes
-  show --student NAME --course NAME [--all-periods]
+  show --student NAME --course NAME [--all-periods] [--with-comments]
                        Show assignments and grades for a course (current quarter by default)
+  comments [--student NAME] [--course NAME] [--all-periods]
+                       Show non-student comments on assignments
   missing [--student NAME] [--all-periods]
                        Find unsubmitted assignments in the current quarter
   alerts [--student NAME] [--threshold PCT] [--all-periods]
@@ -58,6 +60,9 @@ def main() -> None:
     elif command in ("show", "grades", "assignments"):
         target = ROOT / "canvas_query.py"
         command_args = ["assignments", *args]
+    elif command == "comments":
+        target = ROOT / "canvas_query.py"
+        command_args = ["comments", *args]
     elif command in ("missing", "not-submitted"):
         target = ROOT / "canvas_query.py"
         command_args = ["not-submitted", *args]

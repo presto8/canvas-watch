@@ -74,7 +74,13 @@ the quarter). The course name can be a partial match:
 ```bash
 canvas show --student '<student name>' --course '<course name>'
 canvas show --student '<student name>' --course '<course name>' --all-periods
+canvas show --student '<student name>' --course '<course name>' --with-comments
+canvas comments --student '<student name>' --course '<course name>'
 ```
+
+`canvas comments` displays non-student-authored assignment comments, with the
+author and date. It defaults to the current quarter; add `--all-periods` to
+include older comments. The scraper stores these comments during `canvas sync`.
 
 Find assignments with no submission, score, grade, or grading timestamp across
 all students' current quarters:

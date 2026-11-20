@@ -5,12 +5,24 @@ from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from canvas_query import show_alerts, show_assignments, show_history, show_not_submitted, show_upcoming
+from canvas_query import show_alerts, show_assignments, show_history, show_not_submitted, show_upcoming, teacher_comments
 from canvas_materials import canvas_file_ids
 from canvas_scraper import store_observed_data
 
 
 class AssignmentQueryTests(unittest.TestCase):
+    def test_teacher_comments_excludes_student_authored_replies(self):
+        comments = teacher_comments({
+            "user_id": 7,
+            "submission_comments": [
+                {"author_id": 7, "author_name": "Student", "comment": "My reply"},
+                {"author_id": 9, "author_name": "Teacher", "comment": "<p>Revise &amp; resubmit.</p>"},
+            ],
+        }, 7)
+        self.assertEqual(len(comments), 1)
+        self.assertEqual(comments[0]["author"], "Teacher")
+        self.assertEqual(comments[0]["text"], "Revise & resubmit.")
+
     def test_assignment_material_links_only_include_canvas_hosted_files(self):
         assignment = {
             "description": (
